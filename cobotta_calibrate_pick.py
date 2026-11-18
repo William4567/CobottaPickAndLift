@@ -316,6 +316,20 @@ def fingerprint(data):
     return hashlib.sha256(json.dumps(data, sort_keys=True, allow_nan=False).encode()).hexdigest()
 
 
+def board_pdf_matches(path):
+    """True when the printable board is the supplied PDF.
+
+    Git for Windows installs with core.autocrlf=true, and a clone made by such
+    a Git can hold the PDF with CRLF instead of LF. That is the same document,
+    so a converted copy is compared after undoing the conversion; every other
+    change still fails the shipped hash.
+    """
+    data = Path(path).read_bytes()
+    if hashlib.sha256(data).hexdigest() == PRINTABLE_BOARD_SHA256:
+        return True
+    return hashlib.sha256(data.replace(b"\r\n", b"\n")).hexdigest() == PRINTABLE_BOARD_SHA256
+
+
 def array(value, shape, label):
     a = np.asarray(value, dtype=float)
     require(a.shape == shape and np.isfinite(a).all(), "Invalid/missing " + label)
@@ -498,11 +512,9 @@ def validate_setup(setup, for_calibration):
         require(setup.get("board_definition_fingerprint") == fingerprint(BOARD),
                 "automatic_setup.json board definition does not match this program's "
                 "CalibrX 7x5 definition; restore the supplied file")
-        require(hashlib.sha256((ROOT/PRINTABLE_BOARD).read_bytes()).hexdigest() ==
-                PRINTABLE_BOARD_SHA256,
+        require(board_pdf_matches(ROOT/PRINTABLE_BOARD),
                 "The supplied charuco-7x5-letter.pdf is missing or changed (expected "
-                "sha256 " + PRINTABLE_BOARD_SHA256 + "). A Windows clone with "
-                "core.autocrlf=true rewrites it; restore it with:\n  "
+                "sha256 " + PRINTABLE_BOARD_SHA256 + "); restore it with:\n  "
                 "git checkout HEAD -- charuco-7x5.pdf charuco-7x5-letter.pdf")
         thickness = setup.get("board_thickness_mm")
         require(isinstance(thickness, (int, float)) and 0 <= thickness <= 20 and
@@ -3685,7 +3697,7 @@ def main(forced_mode=None):
     if mode in ("board", "instructions"):
         path = ROOT/(PRINTABLE_BOARD if mode == "board" else "docs/OPERATING.md")
         if mode == "board":
-            require(hashlib.sha256(path.read_bytes()).hexdigest() == PRINTABLE_BOARD_SHA256,
+            require(board_pdf_matches(path),
                     "The board PDF has changed; restore the supplied US Letter sheet")
         log(str(path))
         os.startfile(str(path))
