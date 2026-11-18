@@ -71,6 +71,11 @@ and choose a mode from the dropdown:
 The first calibration needs a VIEW: run `set-view` first. `calibrate` stops
 with a clear message if no VIEW is saved.
 
+If you edit the script (for example to set `PROJECT_DIRECTORY`), **open it
+again in RoboDK**. RoboDK runs the copy stored in the Python item, written to
+`%TEMP%` at run time, so the old code keeps running until the file is opened
+again. Do not edit the `%TEMP%` copy; it is overwritten on every run.
+
 Alternative, fully deterministic run (it finds the folder from the script):
 
     cd C:\Users\<you>\Documents\cobottaPickAndLift
@@ -85,11 +90,16 @@ One or more placeholders are still in `config.json`. Fill them in.
 Restore it with `git checkout -- config.json`.
 
 **"COBOTTA project folder not found"**
-RoboDK runs a temporary copy of the script, so it searches for the clone. If
-it cannot find it, set the path once near the top of
-`cobotta_calibrate_pick.py`:
+RoboDK runs a temporary copy of the script, so it searches for the clone. A
+clone under `Documents`, `Desktop`, `Downloads` or a `OneDrive*` folder is found
+automatically up to four folders deep. If it cannot find the clone, set the path
+once near the top of `cobotta_calibrate_pick.py`:
 
     PROJECT_DIRECTORY = r"C:\Users\<you>\Documents\cobottaPickAndLift"
+
+The `r` before the quote is required. Without it, `\U` in `C:\Users` is read as
+a Unicode escape and Python stops with `SyntaxError: (unicode error)
+'unicodeescape' codec can't decode bytes`.
 
 **"Several copies of this project were found"**
 More than one clone exists. Set `PROJECT_DIRECTORY` to the one you want.

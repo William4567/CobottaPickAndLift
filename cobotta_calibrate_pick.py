@@ -25,11 +25,11 @@ from datetime import datetime, timezone
 
 # One configuration file holds every user setting and the run state (saved
 # VIEW, accepted calibration binding). It lives in the repository folder next
-# to this script, so the user can edit it, and it is git-ignored because it
-# holds the camera password. It is created with placeholders on the first run.
-# RoboDK may run a temporary copy of this script, so the folder is located by
-# checking this script's folder, an optional override and a short search of
-# the usual clone locations under the user profile.
+# to this script so the user can edit it. It is tracked with placeholder values
+# because it holds the camera password: fill it in, do not commit it, and the
+# program never creates it. RoboDK may run a temporary copy of this script, so
+# the folder is located by checking this script's folder, an optional override
+# and a short search of the usual clone locations under the user profile.
 PROJECT_DIRECTORY = ""   # Optional override; set only if the search below fails.
 CONFIG_NAME = "config.json"
 CONFIG_TEMPLATE = {
@@ -53,6 +53,16 @@ PROJECT_FILES = ("bcapclient.py", "variant.py", "orinexception.py", "http_camera
                  "collision_assets/stock_gripper_body_F_envelope.stl")
 
 
+def _stop(message):
+    """Stop before any hardware work, with text the operator can see.
+
+    RoboDK does not display the text of a bare SystemExit raised at import, so
+    the reason is printed first and then raised as an ordinary error.
+    """
+    print(message, file=sys.stderr, flush=True)
+    raise RuntimeError(message)
+
+
 def _find_project_directory():
     candidates = []
     if PROJECT_DIRECTORY.strip():
@@ -64,14 +74,17 @@ def _find_project_directory():
              (home/"GitHub", 2), (home/"git", 2),
              (home/"OneDrive"/"Documents", 2), (home/"OneDrive"/"Desktop", 2),
              (home/"Documents"/"GitHub", 1), (home/"source"/"repos", 1)]
+    # School and business accounts sync as "OneDrive - <organisation>" and a
+    # clone can sit four folders below that root, past the bounded walk.
+    for cloud in sorted(home.glob("OneDrive*")):
+        if cloud.is_dir():
+            roots.append((cloud, 4))
     for root, depth in roots:
         if not root.is_dir():
             continue
         patterns = ["cobotta_calibrate_pick.py"]
-        if depth >= 1:
-            patterns.append("*/cobotta_calibrate_pick.py")
-        if depth >= 2:
-            patterns.append("*/*/cobotta_calibrate_pick.py")
+        for level in range(1, depth + 1):
+            patterns.append("/".join(["*"]*level) + "/cobotta_calibrate_pick.py")
         for pattern in patterns:
             try:
                 for script in root.glob(pattern):
@@ -106,16 +119,15 @@ def _find_project_directory():
     if len(found) == 1:
         return found[0]
     if found:
-        raise SystemExit(
-            "Several copies of this project were found:\n  " +
-            "\n  ".join(str(folder) for folder in found) +
-            "\nSet PROJECT_DIRECTORY near the top of cobotta_calibrate_pick.py to the "
-            "copy you want to use.")
-    raise SystemExit(
-        "COBOTTA project folder not found. Clone the repository under your user folder "
-        "(for example Documents) and run again, or set PROJECT_DIRECTORY near the top of "
-        "cobotta_calibrate_pick.py to the clone path. Searched:\n  " +
-        "\n  ".join(str(folder) for folder in [Path(__file__).resolve().parent, Path.cwd()]))
+        _stop("Several copies of this project were found:\n  " +
+              "\n  ".join(str(folder) for folder in found) +
+              "\nSet PROJECT_DIRECTORY near the top of cobotta_calibrate_pick.py to the "
+              "copy you want to use.")
+    _stop("COBOTTA project folder not found. Clone the repository under your user folder "
+          "(for example Documents) and run again, or set PROJECT_DIRECTORY near the top of "
+          "cobotta_calibrate_pick.py to the clone path. Searched under:\n  " +
+          "\n  ".join(str(folder) for folder in [Path(__file__).resolve().parent,
+                                                Path.cwd(), home]))
 
 
 def _config_help(fields):
@@ -126,14 +138,13 @@ def _config_help(fields):
 
 def _load_config():
     if not CONFIG_FILE.is_file():
-        raise SystemExit(
-            "config.json is missing from the project folder:\n  " + str(CONFIG_FILE) +
-            "\nRestore the placeholder copy from the repository with:\n  "
-            "git checkout -- config.json\nThen edit it (see guide.md).")
+        _stop("config.json is missing from the project folder:\n  " + str(CONFIG_FILE) +
+              "\nRestore the placeholder copy from the repository with:\n  "
+              "git checkout -- config.json\nThen edit it (see guide.md).")
     try:
         config = json.loads(CONFIG_FILE.read_text(encoding="utf-8-sig"))
     except ValueError as exc:
-        raise SystemExit("Could not read " + str(CONFIG_FILE) + ": " + str(exc))
+        _stop("Could not read " + str(CONFIG_FILE) + ": " + str(exc))
     for key, value in CONFIG_TEMPLATE.items():
         if key not in config:
             config[key] = value
@@ -151,7 +162,7 @@ def _load_config():
     missing = [key for key, value in placeholders.items()
                if not config.get(key) or str(config.get(key)) == value]
     if missing:
-        raise SystemExit(_config_help(missing))
+        _stop(_config_help(missing))
     return config
 
 
