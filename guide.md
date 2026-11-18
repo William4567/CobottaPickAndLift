@@ -63,7 +63,7 @@ item, with `C:\RoboDK\Python-Embedded\python.exe` as interpreter, then run it
 and choose a mode from the dropdown:
 
 1. `status` — reads the controller, no motion. Check the robot and camera.
-2. `set-view` — saves the current robot pose as VIEW (no motion).
+2. `set-view` — saves the current robot pose as VIEW (no arm motion; the gripper opens only if it is not already fully open, after a confirmation).
 3. `calibrate` — collects a fresh calibration (board flat and visible).
 4. `preview` — locates the cube and plans, without motion.
 5. `pick` — physically picks and lifts the cube.

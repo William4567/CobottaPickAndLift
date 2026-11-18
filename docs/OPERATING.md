@@ -116,9 +116,11 @@ same physical pattern translated onto the Letter page without resizing.
 If the paper measurements refer to the robot's current pose rather than the old
 saved VIEW, run **`set-view` first**. It reads the real controller joints/pose,
 shows a fresh camera image, and asks you to confirm that this pose is the paper's
-measurement reference. It saves a new VIEW without moving the arm or gripper.
-The old configuration is backed up, the old calibration binding is removed, and
-existing calibration files are preserved. Run `calibrate` separately afterward.
+measurement reference. It saves a new VIEW without moving the arm; the gripper
+is left alone when it is already fully open, and otherwise you are told to
+remove any object and asked to approve one open command. The old configuration
+is backed up, the old calibration binding is removed, and existing calibration
+files are preserved. Run `calibrate` separately afterward.
 
 1. Keep the entry point, existing Python helpers and JSON files together in this folder.
    Open `pickandplace`, then load `cobotta_calibrate_pick.py` using RoboDK's File > Open

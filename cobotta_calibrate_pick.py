@@ -3129,6 +3129,47 @@ def confirm_previous_workspace_return(camera, controller, planner, cfg, setup, f
     return anchor
 
 
+def ensure_gripper_open(controller, setup, folder):
+    """Return a stationary state with an open, empty gripper.
+
+    A hand that is already open and empty costs no dialog and no command.
+    Otherwise the operator is told to remove any object and must approve one
+    open command, so nothing is released without an explicit confirmation.
+    """
+    hand = setup["gripper"]
+    open_mm = float(hand["open_position_mm"])
+    state = controller.stable()
+    if not state["hand_holding"] and abs(state["hand_position"] - open_mm) <= .4:
+        return state
+    require(state["servo"],
+            "Gripper is not fully open and motor power is OFF. Open it with the pendant, "
+            "or enable power there, then run again; this program does not enable power "
+            "to release it.")
+    confirm("GRIPPER IS NOT FULLY OPEN (%.1f mm%s).\n\n"
+            "Remove any object from the gripper by hand now. OK then opens the gripper "
+            "at this pose to %.1f mm; anything still held will be released. Keep hands "
+            "clear of the fingers and of the area below them. Cancel stops without "
+            "moving the gripper." % (state["hand_position"],
+                                     ", holding" if state["hand_holding"] else "", open_mm))
+    controller.take()
+    before = controller.stable(powered=True)
+    if not before["hand_holding"] and abs(before["hand_position"] - open_mm) <= .4:
+        return before
+    write_json(folder/"startup_gripper_open.json", {"stage": "opening", "before": before})
+    controller.check_frames()
+    controller.check_motion_state()
+    log("Gripper is not open: opening to %.1f mm at the current pose." % open_mm)
+    controller.hand("HandMoveA", [open_mm, float(hand["open_speed_percent"]), "Next"])
+    controller.wait_hand(lambda: abs(controller.hand("HandCurPos")-open_mm) < .4 and
+                         not controller.hand("HandHoldState"))
+    after = controller.stable(powered=True, empty=True)
+    require(np.max(np.abs(np.asarray(after["joints"])-before["joints"])) < .05,
+            "Arm moved during gripper opening; stopped")
+    write_json(folder/"startup_gripper_open.json",
+               {"stage": "empty_verified", "before": before, "after": after})
+    return after
+
+
 def run_calibration(rdk, cfg, vision, setup, folder):
     require(cfg["observation"].get("joints") and cfg["observation"].get("pose"),
             "No saved VIEW yet. Run the set-view mode first, then calibrate.")
@@ -3139,7 +3180,8 @@ def run_calibration(rdk, cfg, vision, setup, folder):
     records = []
     try:
         with Controller(cfg, setup) as controller:
-            state = controller.prepare_for_motion(folder, empty=True)
+            state = controller.prepare_for_motion(folder, empty=False)
+            state = ensure_gripper_open(controller, setup, folder)
             report = controller.speed_report()
             write_json(folder/"speed_report.json", report)
             write_json(folder/"start_state.json", {"state": state, "speeds": report,
@@ -3389,7 +3431,7 @@ def run_pick(rdk, cfg, vision, setup, folder, execute):
             # Pick may start with a latched HandHoldState after manual removal.
             # Confirmed opening below must verify empty before any arm movement.
             state = (controller.prepare_for_motion(folder, empty=False) if execute
-                     else controller.stable(empty=True))
+                     else ensure_gripper_open(controller, setup, folder))
             report = controller.speed_report()
             write_json(folder/"speed_report.json", report)
             require("workspace" in cal and "controller_reference" in cal["binding"],
@@ -3531,12 +3573,16 @@ def run_pick(rdk, cfg, vision, setup, folder, execute):
 
 
 def save_current_view(cfg, vision, setup):
-    """Read real controller state and preview camera; no arm/gripper commands."""
+    """Read real controller state and preview camera.
+
+    The arm never moves. The gripper is opened only if it is not fully open,
+    after the operator is told to remove any object and approves it.
+    """
     folder = ROOT/"sessions"/(stamp()+"_set_view")
     camera = Camera(vision, folder)
     try:
         with Controller(cfg, setup) as controller:
-            before = controller.stable(empty=True)
+            before = ensure_gripper_open(controller, setup, folder)
             # Controller reference has not yet been reconciled with the physical
             # model. Preserve raw Tool0/Work0 pose, exactly as for the old VIEW.
             camera.frame("current_view_preview")
