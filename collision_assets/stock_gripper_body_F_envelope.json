@@ -1,0 +1,130 @@
+{
+  "frame": "physical DENSO ROS J6 mounting flange; mm",
+  "source": "https://github.com/DENSORobot/denso_cobotta_ros/blob/master/denso_cobotta_descriptions/cobotta_description/gripper_base.dae",
+  "source_sha256": "71a616ec936ae9cede3a893a9b5dc0a218f49ce931c7e6ebcbf45c1fba9b6194",
+  "source_license": "MIT; DENSO WAVE INCORPORATED (source repository)",
+  "source_triangles": 690,
+  "source_bounds_mm": [
+    [
+      -27.5564,
+      -30.571502993950343,
+      -3.50000419521575
+    ],
+    [
+      27.5564,
+      30.571397006456962,
+      35.200004698706806
+    ]
+  ],
+  "construction": "convex hull of every CAD vertex plus each [-2,+2]^3 corner; deterministic +/-0.0001 mm degeneracy perturbation, 100 ppm outward scale; serialized mesh checked against unperturbed expanded CAD",
+  "margin_mm": 2.0,
+  "enclosed_expanded_source_max_halfspace_violation_mm": -0.0016987880398104949,
+  "watertight_edges_incidence": 2,
+  "vertices": 359,
+  "triangles": 714,
+  "bounds_mm": [
+    [
+      -29.559505462646484,
+      -32.57483673095703,
+      -5.502580165863037
+    ],
+    [
+      29.559358596801758,
+      32.574771881103516,
+      37.2018928527832
+    ]
+  ],
+  "sha256": "bed7a9debe3d7fc1472cc8debd6eeb71a8dd7ece4d53fd466523df44d09e47ba",
+  "scope": "rigid stock body only; finger opening sweep remains a separate proxy",
+  "offline_camera_pair_comparison": [
+    {
+      "J6_deg": 5.62,
+      "old_AABB": {
+        "overlapping_camera_boxes": 0,
+        "minimum_separating_projection_mm": 0.21074673042973302
+      },
+      "CAD_hull": {
+        "overlapping_camera_boxes": 0,
+        "minimum_separating_projection_mm": 2.333636868335752
+      }
+    },
+    {
+      "J6_deg": 6.214,
+      "old_AABB": {
+        "overlapping_camera_boxes": 0,
+        "minimum_separating_projection_mm": 0.004337354352138334
+      },
+      "CAD_hull": {
+        "overlapping_camera_boxes": 0,
+        "minimum_separating_projection_mm": 2.2777720164667095
+      }
+    },
+    {
+      "J6_deg": 6.8,
+      "old_AABB": {
+        "overlapping_camera_boxes": 9,
+        "minimum_separating_projection_mm": -0.2024522996178888
+      },
+      "CAD_hull": {
+        "overlapping_camera_boxes": 0,
+        "minimum_separating_projection_mm": 2.225789803019481
+      }
+    },
+    {
+      "J6_deg": 7.5,
+      "old_AABB": {
+        "overlapping_camera_boxes": 16,
+        "minimum_separating_projection_mm": -0.45355410973599675
+      },
+      "CAD_hull": {
+        "overlapping_camera_boxes": 0,
+        "minimum_separating_projection_mm": 2.167777699526308
+      }
+    },
+    {
+      "J6_deg": 8,
+      "old_AABB": {
+        "overlapping_camera_boxes": 16,
+        "minimum_separating_projection_mm": -0.6356148609491754
+      },
+      "CAD_hull": {
+        "overlapping_camera_boxes": 0,
+        "minimum_separating_projection_mm": 2.129066196606022
+      }
+    },
+    {
+      "J6_deg": 10,
+      "old_AABB": {
+        "overlapping_camera_boxes": 30,
+        "minimum_separating_projection_mm": -1.38607896430576
+      },
+      "CAD_hull": {
+        "overlapping_camera_boxes": 0,
+        "minimum_separating_projection_mm": 1.9969949390632813
+      }
+    },
+    {
+      "J6_deg": 12,
+      "old_AABB": {
+        "overlapping_camera_boxes": 45,
+        "minimum_separating_projection_mm": -2.1714044385804954
+      },
+      "CAD_hull": {
+        "overlapping_camera_boxes": 0,
+        "minimum_separating_projection_mm": 1.90147771344596
+      }
+    },
+    {
+      "J6_deg": 15,
+      "old_AABB": {
+        "overlapping_camera_boxes": 68,
+        "minimum_separating_projection_mm": -3.412654378454789
+      },
+      "CAD_hull": {
+        "overlapping_camera_boxes": 0,
+        "minimum_separating_projection_mm": 1.8203632743882352
+      }
+    }
+  ],
+  "validation_limit": "CAD containment and pair geometry only; no RoboDK/robot program, hardware, motion or tests run"
+}

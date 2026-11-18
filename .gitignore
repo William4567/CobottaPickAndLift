@@ -1,0 +1,17 @@
+# Per-run evidence and generated data
+sessions/
+calibrations/*.json
+*.backup_*.json
+
+# Local backups and Python cache
+backups/
+__pycache__/
+*.pyc
+
+# Stop latch and temporary files
+STOP_COBOTTA
+*.tmp
+.env
+
+# Internal handoff notes (never published)
+docs/HANDOFF_FOR_NEW_CHAT.md

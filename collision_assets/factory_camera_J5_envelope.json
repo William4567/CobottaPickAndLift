@@ -1,0 +1,37 @@
+{
+  "file": "factory_camera_J5_envelope.stl",
+  "sha256": "9daf6e4b13f3ce0ee7afc1d5ad41ca06ea1fb8390593dec2502ebc0fbceb229d",
+  "frame": "DENSO_ROS_J5",
+  "mounting_link": 5,
+  "enclosure_margin_mm": 2.0,
+  "factory_profile_sweep_J5_z_mm": [
+    -18.5,
+    0.0
+  ],
+  "source_robot_file_sha256": "259ce21687000983b69293c143ac24f987c81d689ad73fd65863dc4352b957a2",
+  "source_link5_stl_sha256": "6af79fbc2371c92acac5e66c581da79f69490e1c00fb8fb03b1d1e12fcb17071",
+  "source_cad_triangle_count": 26345,
+  "kept_camera_assembly_triangles": 22991,
+  "removed_wrist_casing_triangles": 3354,
+  "enclosure_boxes": 3387,
+  "enclosure_triangles": 40644,
+  "sources": [
+    "https://robodk.com/robot/Denso/Cobotta",
+    "https://www.dehomespace.top/RobotManual/RC8/Cobotta_jp/img/004004/cobotta_size.pdf"
+  ],
+  "limitation": "Factory camera, bracket and CAD cable loop only. A displaced loose cable or added fixtures require updated geometry.",
+  "refinement": {
+    "reason": "Centroid grouping of long source triangles filled empty space near the gripper.",
+    "previous_asset_sha256": "1769e93f273b30440d6d28be8054acbba2266a6e8c45ca009937adb20ff9f8c4",
+    "previous_enclosure_boxes": 335,
+    "subdivided_triangles": 81686,
+    "maximum_subtriangle_axis_span_mm": 4.0,
+    "refined_group_cell_mm": 4.0,
+    "parent_group_cell_mm": 8.0,
+    "parent_group_isolation": true,
+    "max_box_excess_beyond_parent_mm_before_float32": 0.0,
+    "source_geometry_removed": false,
+    "float32_bounds": "rounded outward",
+    "development_validation": "Offline CAD processing only; no RoboDK, hardware or robot program run."
+  }
+}
