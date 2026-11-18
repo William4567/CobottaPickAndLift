@@ -24,12 +24,15 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 
 # One configuration file holds every user setting and the run state (saved
-# VIEW, accepted calibration binding). It is created with placeholders on the
-# first run. %APPDATA% is writable without administrator rights.
-CONFIG_DIRECTORY = Path(os.environ.get("APPDATA") or Path.home())/"cobottaPickAndLift"
-CONFIG_FILE = CONFIG_DIRECTORY/"config.json"
+# VIEW, accepted calibration binding). It lives in the repository folder next
+# to this script, so the user can edit it, and it is git-ignored because it
+# holds the camera password. It is created with placeholders on the first run.
+# RoboDK may run a temporary copy of this script, so the folder is located by
+# checking this script's folder, an optional override and a short search of
+# the usual clone locations under the user profile.
+PROJECT_DIRECTORY = ""   # Optional override; set only if the search below fails.
+CONFIG_NAME = "config.json"
 CONFIG_TEMPLATE = {
-    "project_directory": r"C:\path\to\cobottaPickAndLift",
     "robot_ip": "ROBOT_IP",
     "camera_ip": "CAMERA_IP",
     "camera_username": "CAMERA_USER",
@@ -45,9 +48,60 @@ CONFIG_TEMPLATE = {
 }
 PROJECT_FILES = ("bcapclient.py", "variant.py", "orinexception.py", "http_camera.py",
                  "detect_blue.py", "cobotta_calibrate_pick.py", "automatic_setup.json",
-                 "charuco-7x5.pdf", "charuco-7x5-letter.pdf",
+                 "config.example.json", "charuco-7x5.pdf", "charuco-7x5-letter.pdf",
                  "collision_assets/factory_camera_J5_envelope.stl",
                  "collision_assets/stock_gripper_body_F_envelope.stl")
+
+
+def _find_project_directory():
+    candidates = []
+    if PROJECT_DIRECTORY.strip():
+        candidates.append(Path(PROJECT_DIRECTORY).expanduser())
+    candidates += [Path(__file__).resolve().parent, Path.cwd()]
+    home = Path.home()
+    roots = [(home, 1), (home/"Documents", 2), (home/"Desktop", 2),
+             (home/"Downloads", 2), (home/"source", 2), (home/"repos", 2),
+             (home/"GitHub", 2), (home/"git", 2),
+             (home/"OneDrive"/"Documents", 2), (home/"OneDrive"/"Desktop", 2),
+             (home/"Documents"/"GitHub", 1), (home/"source"/"repos", 1)]
+    for root, depth in roots:
+        if not root.is_dir():
+            continue
+        patterns = ["cobotta_calibrate_pick.py"]
+        if depth >= 1:
+            patterns.append("*/cobotta_calibrate_pick.py")
+        if depth >= 2:
+            patterns.append("*/*/cobotta_calibrate_pick.py")
+        for pattern in patterns:
+            try:
+                for script in root.glob(pattern):
+                    candidates.append(script.parent)
+            except OSError:
+                continue
+    seen, found = set(), []
+    for folder in candidates:
+        try:
+            folder = folder.resolve()
+        except OSError:
+            continue
+        if folder in seen:
+            continue
+        seen.add(folder)
+        if all((folder/name).is_file() for name in PROJECT_FILES):
+            found.append(folder)
+    if len(found) == 1:
+        return found[0]
+    if found:
+        raise SystemExit(
+            "Several copies of this project were found:\n  " +
+            "\n  ".join(str(folder) for folder in found) +
+            "\nSet PROJECT_DIRECTORY near the top of cobotta_calibrate_pick.py to the "
+            "copy you want to use.")
+    raise SystemExit(
+        "COBOTTA project folder not found. Clone the repository under your user folder "
+        "(for example Documents) and run again, or set PROJECT_DIRECTORY near the top of "
+        "cobotta_calibrate_pick.py to the clone path. Searched:\n  " +
+        "\n  ".join(str(folder) for folder in [Path(__file__).resolve().parent, Path.cwd()]))
 
 
 def _config_help(fields):
@@ -59,7 +113,6 @@ def _config_help(fields):
 def _load_config():
     if not CONFIG_FILE.is_file():
         try:
-            CONFIG_DIRECTORY.mkdir(parents=True, exist_ok=True)
             CONFIG_FILE.write_text(json.dumps(CONFIG_TEMPLATE, indent=2) + "\n",
                                    encoding="utf-8")
         except OSError as exc:
@@ -67,8 +120,8 @@ def _load_config():
                              str(CONFIG_FILE) + "\n" + str(exc))
         raise SystemExit(
             "Created a configuration file with placeholders:\n  " + str(CONFIG_FILE) +
-            "\nSet project_directory, robot_ip, camera_ip, camera_username and "
-            "camera_password in that file, then run the program again. See guide.md.")
+            "\nSet robot_ip, camera_ip, camera_username and camera_password in that "
+            "file, then run the program again. See guide.md.")
     try:
         config = json.loads(CONFIG_FILE.read_text(encoding="utf-8-sig"))
     except ValueError as exc:
@@ -84,8 +137,7 @@ def _load_config():
         config["vision"] = dict(CONFIG_TEMPLATE["vision"])
     for key, value in CONFIG_TEMPLATE["vision"].items():
         config["vision"].setdefault(key, value)
-    placeholders = {"project_directory": CONFIG_TEMPLATE["project_directory"],
-                    "robot_ip": "ROBOT_IP", "camera_ip": "CAMERA_IP",
+    placeholders = {"robot_ip": "ROBOT_IP", "camera_ip": "CAMERA_IP",
                     "camera_username": "CAMERA_USER",
                     "camera_password": "CAMERA_PASSWORD"}
     missing = [key for key, value in placeholders.items()
@@ -95,20 +147,9 @@ def _load_config():
     return config
 
 
-def _project_directory(directory):
-    folder = Path(directory).expanduser()
-    missing = [name for name in PROJECT_FILES if not (folder/name).is_file()]
-    if missing:
-        raise SystemExit(
-            "The project_directory in " + str(CONFIG_FILE) + " does not contain the "
-            "whole project:\n  " + str(folder) + "\nMissing: " + ", ".join(missing) +
-            "\nSet project_directory to the folder where you cloned the repository. "
-            "See guide.md.")
-    return folder.resolve()
-
-
+ROOT = _find_project_directory()
+CONFIG_FILE = ROOT/CONFIG_NAME
 CONFIG = _load_config()
-ROOT = _project_directory(CONFIG["project_directory"])
 # Optional, user-installed dependency folder (no administrator rights):
 #   python -m pip install --target <clone>\vendor numpy==1.25.2 opencv-contrib-python==4.5.5.64
 sys.path.insert(0, str(ROOT))

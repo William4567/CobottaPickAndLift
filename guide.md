@@ -1,7 +1,7 @@
 # Setup guide
 
-This is the only guide you need. There is **one config file**; the program
-creates it for you on the first run.
+This is the only guide you need. There is **one config file**, in the
+repository folder; the program creates it for you on the first run.
 
 ## What you need
 
@@ -11,16 +11,16 @@ creates it for you on the first run.
 - A DENSO COBOTTA (b-CAP, TCP 5007) and a Canon N10-W02 camera (1920 x 1080).
 - The printed `charuco-7x5-letter.pdf` board, actual size.
 
-No administrator rights are needed. Everything is written under your user
-profile.
+No administrator rights are needed.
 
 ## 1. Clone the repository
 
-Clone it anywhere you can write, for example:
+Clone it under your user folder, for example:
 
     C:\Users\<you>\Documents\cobottaPickAndLift
 
-Remember this path. You will paste it into the config file.
+The program searches for the folder automatically. If you keep it somewhere
+unusual, see the troubleshooting section.
 
 ## 2. Install the Python packages (no admin)
 
@@ -29,29 +29,29 @@ Otherwise install them **inside the repository** with `--target`:
 
     "C:\RoboDK\Python-Embedded\python.exe" -m pip install --target "C:\Users\<you>\Documents\cobottaPickAndLift\vendor" "numpy==1.25.2" "opencv-contrib-python==4.5.5.64"
 
-The program puts `vendor\` first on the Python path, so the packages are used
-without touching `C:\RoboDK`. This needs internet access and writes only
-inside the repository.
+The program puts `vendor\` first on the Python path, so nothing under
+`C:\RoboDK` is modified. This needs internet access and writes only inside the
+repository.
 
 ## 3. First run: create the config file
 
 1. In RoboDK: **File > Open** → select `cobotta_calibrate_pick.py` so it becomes
    a Python item. Set the interpreter to
    `C:\RoboDK\Python-Embedded\python.exe`.
-2. Run the item once. It creates
+2. Run the item once. It creates `config.json` **in the repository folder**,
+   next to the script:
 
-       C:\Users\<you>\AppData\Roaming\cobottaPickAndLift\config.json
+       C:\Users\<you>\Documents\cobottaPickAndLift\config.json
 
-   with placeholders and stops, printing that path.
+   and stops, printing that path.
 
 ## 4. Edit the config file
 
-Open the file printed by the program and fill in these fields:
+Open the file and fill in these fields:
 
 | Field | Set it to |
 | --- | --- |
-| `project_directory` | The folder you cloned, e.g. `C:\\Users\\<you>\\Documents\\cobottaPickAndLift` |
-| `robot_ip` | The COBOTTA controller IP used by RoboDK / b-CAP |
+| `robot_ip` | The COBOTTA controller IP |
 | `camera_ip` | The camera IP |
 | `camera_username` | The camera HTTP user name |
 | `camera_password` | The camera HTTP password |
@@ -61,9 +61,9 @@ Leave these unless you changed the cell:
 - `approach_clearance_mm` (40), `lift_mm` (30)
 - `speed_percent` — must stay **100**
 - `observation` — the program fills it when you run `set-view`
-- `vision` — colour/ROI defaults; edit only if your cube detection needs it
+- `vision` — colour/ROI defaults; edit only if cube detection needs it
 
-The config file is **per user and outside the repository**, so your IPs and
+`config.json` is in the repository but is **git-ignored**, so your IPs and
 password are never committed. Do not share it.
 
 ## 5. Run
@@ -82,23 +82,23 @@ with a clear message if no VIEW is saved.
 ## Troubleshooting
 
 **"Created a configuration file with placeholders"**
-Normal on the first run. Edit the file and run again.
+Normal on the first run. Edit the `config.json` it prints and run again.
 
 **"Fields to set: ..."**
-One or more placeholders are still in the config. Fill them in.
+One or more placeholders are still in `config.json`. Fill them in.
 
-**"The project_directory ... does not contain the whole project"**
-`project_directory` does not point at the clone, or the clone is incomplete.
-It must contain `cobotta_calibrate_pick.py`, `automatic_setup.json`, the PDFs
-and `collision_assets\`.
+**"COBOTTA project folder not found"**
+The program could not find the cloned folder (RoboDK runs a temporary copy of
+the script). Clone it under Documents/Desktop/Downloads, or set the path once
+near the top of `cobotta_calibrate_pick.py`:
+
+    PROJECT_DIRECTORY = r"C:\Users\<you>\Documents\cobottaPickAndLift"
+
+**"Several copies of this project were found"**
+More than one clone exists. Set `PROJECT_DIRECTORY` to the one you want.
 
 **"This implementation uses OpenCV 4.5.5 ..."**
 Install the pinned packages as in step 2 and run again.
 
 **"Set camera_password ..."**
 The camera password field is still the placeholder.
-
-**The program still runs from `%TEMP%`**
-That is normal: RoboDK copies the script. The config file's
-`project_directory` tells it where the project is, so no environment variable
-is needed.

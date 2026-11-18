@@ -34,10 +34,10 @@ entirely under your user profile.
    Skip this if RoboDK's Python already has OpenCV 4.5.5 and numpy 1.25.
 3. In RoboDK: **File > Open** `cobotta_calibrate_pick.py` so it becomes a
    Python item, with `C:\RoboDK\Python-Embedded\python.exe` as interpreter.
-4. Run the item once. It creates **one config file**:
-   `C:\Users\<you>\AppData\Roaming\cobottaPickAndLift\config.json`
-   Edit `project_directory`, `robot_ip`, `camera_ip`, `camera_username` and
-   `camera_password`, then run again.
+4. Run the item once. It creates **one config file in the clone folder**,
+   `config.json` next to the script. Edit `robot_ip`, `camera_ip`,
+   `camera_username` and `camera_password`, then run again. The file is
+   git-ignored, so your settings are never committed.
 5. Choose a mode from the dropdown: `status`, `set-view`, `calibrate`,
    `preview`, `pick` (plus `board` and `instructions`).
 

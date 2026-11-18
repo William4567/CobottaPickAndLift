@@ -1,5 +1,4 @@
 {
-  "project_directory": "C:\\path\\to\\cobottaPickAndLift",
   "robot_ip": "ROBOT_IP",
   "camera_ip": "CAMERA_IP",
   "camera_username": "CAMERA_USER",

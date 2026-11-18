@@ -119,9 +119,7 @@ def overlay(frame, result):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path,
-                        default=Path(os.environ.get("APPDATA") or Path.home())
-                        / "cobottaPickAndLift" / "config.json")
+    parser.add_argument("--config", type=Path, default=ROOT / "config.json")
     parser.add_argument("--image", type=Path)
     parser.add_argument("--live", action="store_true")
     parser.add_argument("--headless", action="store_true")

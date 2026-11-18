@@ -346,7 +346,7 @@ are preserved. Saved VIEW, live camera settings and controller limits are unchan
 
 Successful calibration writes a unique `calibrations/*_calibration_v2.json` and
 then atomically binds it in the single config file
-(`%APPDATA%\cobottaPickAndLift\config.json`). If saving the config fails, the
+(`config.json` in the project folder). If saving the config fails, the
 previous calibration file/reference remains intact. Keep the `calibrations/`
 folder with the project. Picking also requires the cube outline to be inside
 the image region covered by calibration observations.
@@ -382,6 +382,7 @@ all JSON, PDF and session paths. It prints the selected folder when started.
 Keep the existing helpers in the project folder; they do not need installing
 into RoboDK's site-packages or copying into Temp.
 
-The project folder is the `project_directory` value in
-`%APPDATA%\cobottaPickAndLift\config.json`. If you move the clone, update that
-value; no environment variable is needed.
+The project folder is the folder containing `cobotta_calibrate_pick.py` and
+`config.json`. The program finds it automatically; if you keep the clone
+somewhere unusual, set `PROJECT_DIRECTORY` near the top of
+`cobotta_calibrate_pick.py`.
