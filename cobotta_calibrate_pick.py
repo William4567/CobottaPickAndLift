@@ -23,45 +23,101 @@ import traceback
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
+# One configuration file holds every user setting and the run state (saved
+# VIEW, accepted calibration binding). It is created with placeholders on the
+# first run. %APPDATA% is writable without administrator rights.
+CONFIG_DIRECTORY = Path(os.environ.get("APPDATA") or Path.home())/"cobottaPickAndLift"
+CONFIG_FILE = CONFIG_DIRECTORY/"config.json"
+CONFIG_TEMPLATE = {
+    "project_directory": r"C:\path\to\cobottaPickAndLift",
+    "robot_ip": "ROBOT_IP",
+    "camera_ip": "CAMERA_IP",
+    "camera_username": "CAMERA_USER",
+    "camera_password": "CAMERA_PASSWORD",
+    "approach_clearance_mm": 40,
+    "lift_mm": 30,
+    "speed_percent": 100,
+    "observation": {"pose": None, "joints": None, "tool": 0, "work": 0},
+    "vision": {"roi_xywh": None, "hsv_lower": [90, 40, 15],
+               "hsv_upper": [135, 255, 255], "min_area_px": 400,
+               "max_area_px": 200000, "max_aspect_ratio": 1.6,
+               "min_rectangular_fill": 0.7},
+}
+PROJECT_FILES = ("bcapclient.py", "variant.py", "orinexception.py", "http_camera.py",
+                 "detect_blue.py", "cobotta_calibrate_pick.py", "automatic_setup.json",
+                 "charuco-7x5.pdf", "charuco-7x5-letter.pdf",
+                 "collision_assets/factory_camera_J5_envelope.stl",
+                 "collision_assets/stock_gripper_body_F_envelope.stl")
+
+
+def _config_help(fields):
+    return ("Edit the configuration file and run again:\n  " + str(CONFIG_FILE) +
+            "\nFields to set: " + ", ".join(fields) +
+            "\nSee guide.md for what each field means.")
+
+
+def _load_config():
+    if not CONFIG_FILE.is_file():
+        try:
+            CONFIG_DIRECTORY.mkdir(parents=True, exist_ok=True)
+            CONFIG_FILE.write_text(json.dumps(CONFIG_TEMPLATE, indent=2) + "\n",
+                                   encoding="utf-8")
+        except OSError as exc:
+            raise SystemExit("Could not create the configuration file:\n  " +
+                             str(CONFIG_FILE) + "\n" + str(exc))
+        raise SystemExit(
+            "Created a configuration file with placeholders:\n  " + str(CONFIG_FILE) +
+            "\nSet project_directory, robot_ip, camera_ip, camera_username and "
+            "camera_password in that file, then run the program again. See guide.md.")
+    try:
+        config = json.loads(CONFIG_FILE.read_text(encoding="utf-8-sig"))
+    except ValueError as exc:
+        raise SystemExit("Could not read " + str(CONFIG_FILE) + ": " + str(exc))
+    for key, value in CONFIG_TEMPLATE.items():
+        if key not in config:
+            config[key] = value
+    if not isinstance(config.get("observation"), dict):
+        config["observation"] = dict(CONFIG_TEMPLATE["observation"])
+    for key, value in CONFIG_TEMPLATE["observation"].items():
+        config["observation"].setdefault(key, value)
+    if not isinstance(config.get("vision"), dict):
+        config["vision"] = dict(CONFIG_TEMPLATE["vision"])
+    for key, value in CONFIG_TEMPLATE["vision"].items():
+        config["vision"].setdefault(key, value)
+    placeholders = {"project_directory": CONFIG_TEMPLATE["project_directory"],
+                    "robot_ip": "ROBOT_IP", "camera_ip": "CAMERA_IP",
+                    "camera_username": "CAMERA_USER",
+                    "camera_password": "CAMERA_PASSWORD"}
+    missing = [key for key, value in placeholders.items()
+               if not config.get(key) or str(config.get(key)) == value]
+    if missing:
+        raise SystemExit(_config_help(missing))
+    return config
+
+
+def _project_directory(directory):
+    folder = Path(directory).expanduser()
+    missing = [name for name in PROJECT_FILES if not (folder/name).is_file()]
+    if missing:
+        raise SystemExit(
+            "The project_directory in " + str(CONFIG_FILE) + " does not contain the "
+            "whole project:\n  " + str(folder) + "\nMissing: " + ", ".join(missing) +
+            "\nSet project_directory to the folder where you cloned the repository. "
+            "See guide.md.")
+    return folder.resolve()
+
+
+CONFIG = _load_config()
+ROOT = _project_directory(CONFIG["project_directory"])
+# Optional, user-installed dependency folder (no administrator rights):
+#   python -m pip install --target <clone>\vendor numpy==1.25.2 opencv-contrib-python==4.5.5.64
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT/"vendor"))
+
 import cv2
 import numpy as np
 from robodk import robolink, robomath, robodialogs
 
-# RoboDK can execute the station's Python text as %TEMP%/Prog1.py. Its
-# __file__ then identifies the temporary copy, not the project directory.
-# Resolve one complete project BEFORE importing the local communication helpers.
-PROJECT_DIRECTORY = r"C:\path\to\cobottaPickAndLift"
-PROJECT_FILES = ("bcapclient.py", "variant.py", "orinexception.py", "http_camera.py",
-                 "detect_blue.py", "cobotta_calibrate_pick.py", "pick_config.json",
-                 "vision_config.json", "automatic_setup.json", "charuco-7x5.pdf",
-                 "charuco-7x5-letter.pdf", "collision_assets/factory_camera_J5_envelope.stl",
-                 "collision_assets/stock_gripper_body_F_envelope.stl")
-
-
-def _find_project_directory():
-    override = os.environ.get("COBOTTA_PROJECT_DIR", "").strip()
-    if override:
-        candidates = [Path(override).expanduser()]
-    else:
-        candidates = [Path(__file__).resolve().parent, Path(PROJECT_DIRECTORY),
-                      Path.cwd(), Path.cwd()/"cobotta_blue_pick",
-                      Path.cwd()/"outputs"/"cobotta_blue_pick"]
-    searched = []
-    for folder in candidates:
-        folder = folder.resolve()
-        missing = [name for name in PROJECT_FILES if not (folder/name).is_file()]
-        if not missing:
-            return folder
-        searched.append(str(folder) + " (missing: " + ", ".join(missing) + ")")
-    raise RuntimeError("COBOTTA project folder not found. Keep the delivered helper, "
-                       "configuration and PDF files together. Set PROJECT_DIRECTORY "
-                       "at the top of this script or COBOTTA_PROJECT_DIR to that folder. "
-                       "RoboDK's temporary Prog1.py folder is not the project. Searched:\n" +
-                       "\n".join(searched))
-
-
-ROOT = _find_project_directory()
-sys.path.insert(0, str(ROOT))
 from bcapclient import BCAPClient
 from http_camera import HTTPCamera
 from detect_blue import blue_mask, detect, overlay
@@ -818,9 +874,9 @@ class Camera:
         self.vision, self.folder = vision, Path(folder)
         self.folder.mkdir(parents=True, exist_ok=True)
         self.board, self.dictionary = get_board()
-        password = os.environ.get("COBOTTA_CAMERA_PASSWORD", "")
-        require(password, "Set the COBOTTA_CAMERA_PASSWORD environment variable to the camera "
-                          "login password before running; it is never stored in the repository.")
+        password = str(vision.get("camera_password", ""))
+        require(password and password != "CAMERA_PASSWORD",
+                "Set camera_password in " + str(CONFIG_FILE) + " (see guide.md).")
         self.http = HTTPCamera(vision["camera_ip"], vision["camera_username"],
                                password, timeout=snapshot_timeout)
 
@@ -3075,10 +3131,10 @@ def run_calibration(rdk, cfg, vision, setup, folder):
             # reference still identifies the untouched previous calibration.
             accepted_path = ROOT/"calibrations"/(stamp()+"_calibration_v2.json")
             write_json(accepted_path, result)
-            updated = dict(cfg)
-            updated["calibration_v2"] = {"schema": SCHEMA, "path": accepted_path.relative_to(ROOT).as_posix(),
+            CONFIG["calibration_v2"] = {"schema": SCHEMA,
+                                        "path": accepted_path.relative_to(ROOT).as_posix(),
                                         "sha256": fingerprint(result)}
-            write_json(ROOT/"pick_config.json", updated, backup=True)
+            write_json(CONFIG_FILE, CONFIG, backup=True)
             log("Calibration accepted and saved; at VIEW. No pick has run. "
                 "Remove the board, put down one blue cube, then select Preview or Pick.")
     finally:
@@ -3418,16 +3474,13 @@ def save_current_view(cfg, vision, setup):
             latest = controller.stable(empty=True)
             require(np.max(np.abs(np.asarray(after["joints"])-latest["joints"])) < .05,
                     "Robot moved while confirming VIEW; nothing saved")
-            updated = dict(cfg)
-            updated["observation"] = {"pose": latest["pose"], "joints": latest["joints"],
-                                      "tool": 0, "work": 0}
-            updated.pop("calibration_v1", None)
-            updated.pop("calibration_v2", None)
-            updated["calibration_physically_verified"] = False
-            updated["geometry_and_route_verified"] = False
+            new_observation = {"pose": latest["pose"], "joints": latest["joints"],
+                               "tool": 0, "work": 0}
             write_json(folder/"new_view.json", {"old_observation": cfg["observation"],
-                       "new_observation": updated["observation"], "frames": controller.frames()})
-            write_json(ROOT/"pick_config.json", updated, backup=True)
+                       "new_observation": new_observation, "frames": controller.frames()})
+            CONFIG["observation"] = new_observation
+            CONFIG.pop("calibration_v2", None)
+            write_json(CONFIG_FILE, CONFIG, backup=True)
             log("New VIEW saved. No motion performed. Run calibrate separately to collect new data.")
     finally:
         camera.close()
@@ -3569,7 +3622,16 @@ def main(forced_mode=None):
         log(str(path))
         os.startfile(str(path))
         return
-    cfg, vision = read_json(ROOT/"pick_config.json"), read_json(ROOT/"vision_config.json")
+    cfg = {"robot_ip": CONFIG["robot_ip"], "observation": CONFIG["observation"],
+           "speed_percent": CONFIG["speed_percent"],
+           "approach_clearance_mm": CONFIG["approach_clearance_mm"],
+           "lift_mm": CONFIG["lift_mm"]}
+    if CONFIG.get("calibration_v2"):
+        cfg["calibration_v2"] = CONFIG["calibration_v2"]
+    vision = {"camera_ip": CONFIG["camera_ip"],
+              "camera_username": CONFIG["camera_username"],
+              "camera_password": CONFIG["camera_password"]}
+    vision.update(CONFIG.get("vision", {}))
     setup = read_json(ROOT/"automatic_setup.json")
     require(cfg["observation"]["tool"] == 0 and cfg["observation"]["work"] == 0,
             "This workflow uses saved flange Tool 0 / base Work 0")

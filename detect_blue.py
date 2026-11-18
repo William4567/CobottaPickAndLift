@@ -119,7 +119,9 @@ def overlay(frame, result):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, default=ROOT / "vision_config.json")
+    parser.add_argument("--config", type=Path,
+                        default=Path(os.environ.get("APPDATA") or Path.home())
+                        / "cobottaPickAndLift" / "config.json")
     parser.add_argument("--image", type=Path)
     parser.add_argument("--live", action="store_true")
     parser.add_argument("--headless", action="store_true")
@@ -127,14 +129,15 @@ def main():
     args = parser.parse_args()
     if args.live and (args.image or args.headless):
         parser.error("--live requires a camera and a visible window")
-    config = json.loads(args.config.read_text(encoding="utf-8"))
+    config = json.loads(args.config.read_text(encoding="utf-8-sig"))
+    vision = config.get("vision", config)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     camera = None
     try:
         if not args.image:
-            password = os.environ.get("COBOTTA_CAMERA_PASSWORD", "")
-            if not password:
-                raise SystemExit("Set COBOTTA_CAMERA_PASSWORD before using the live camera")
+            password = str(config.get("camera_password", ""))
+            if not password or password == "CAMERA_PASSWORD":
+                raise SystemExit("Set camera_password in " + str(args.config))
             camera = HTTPCamera(config["camera_ip"], config["camera_username"], password)
         if not args.headless:
             cv2.namedWindow("Blue cube detection", cv2.WINDOW_NORMAL)
@@ -147,7 +150,7 @@ def main():
                 frame = cv2.imdecode(np.frombuffer(camera.capture(), np.uint8), cv2.IMREAD_COLOR)
             if frame is None:
                 raise RuntimeError("Image could not be decoded")
-            result = detect(frame, config)
+            result = detect(frame, vision)
             result["capture_started_unix"] = capture_started
             result["capture_completed_unix"] = time.time()
             result["source"] = str(args.image) if args.image else "fresh_http_capture"
