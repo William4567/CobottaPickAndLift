@@ -1,0 +1,5 @@
+# Keep binary assets byte-identical in every clone. Git for Windows installs
+# with core.autocrlf=true, which treats these PDFs as text and rewrites them on
+# checkout; the program verifies their sha256 and refuses to calibrate.
+*.pdf -text
+*.stl -text

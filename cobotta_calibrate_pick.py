@@ -492,10 +492,18 @@ def validate_setup(setup, for_calibration):
             "The supplied factory camera/gripper meshes include a fixed 2 mm allowance. "
             "A different margin requires regenerated verified assets; no margin was changed.")
     if for_calibration:
-        require(setup.get("board_scale_verified") is True and
-                setup.get("board_definition_fingerprint") == fingerprint(BOARD) and
-                hashlib.sha256((ROOT/PRINTABLE_BOARD).read_bytes()).hexdigest() == PRINTABLE_BOARD_SHA256,
-                "Fixed Letter print or board verification is missing or changed")
+        require(setup.get("board_scale_verified") is True,
+                "automatic_setup.json does not record the verified printed-board scale; "
+                "restore the supplied file")
+        require(setup.get("board_definition_fingerprint") == fingerprint(BOARD),
+                "automatic_setup.json board definition does not match this program's "
+                "CalibrX 7x5 definition; restore the supplied file")
+        require(hashlib.sha256((ROOT/PRINTABLE_BOARD).read_bytes()).hexdigest() ==
+                PRINTABLE_BOARD_SHA256,
+                "The supplied charuco-7x5-letter.pdf is missing or changed (expected "
+                "sha256 " + PRINTABLE_BOARD_SHA256 + "). A Windows clone with "
+                "core.autocrlf=true rewrites it; restore it with:\n  "
+                "git checkout HEAD -- charuco-7x5.pdf charuco-7x5-letter.pdf")
         thickness = setup.get("board_thickness_mm")
         require(isinstance(thickness, (int, float)) and 0 <= thickness <= 20 and
                 setup.get("optics_locked_confirmed") is True,
