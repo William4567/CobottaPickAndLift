@@ -34,7 +34,11 @@ Default gates: at least 16 fit and 6 check views; fit RMS <= 0.8 pixels;
 maximum per-check RMS <= 3 pixels; maximum check-corner plane error <= 1.5 mm;
 maximum board-angle discrepancy <= 0.7 degrees. Image coverage must span at least
 85% horizontally and 80% vertically, with a convex-hull area of at least 60% of the
-image. Rotation and translation excitation checks reject insufficiently varied views.
+image. Rotation and translation excitation checks reject insufficiently varied views,
+and at least one fit view must tilt the board 15 degrees or more out of plane
+relative to the first fit view; in-plane roll does not count. The collection now
+measures that tilt while it plans, so a pose that cannot provide it stops the run
+before the sweep instead of after it.
 These are software acceptance thresholds, not demonstrated accuracy of this setup.
 
 Accepted images still require at least 12 identified ChArUco corners spanning

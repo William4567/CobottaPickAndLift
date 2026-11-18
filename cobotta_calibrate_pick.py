@@ -3012,7 +3012,10 @@ def collect_guided_views(camera, controller, planner, anchor, guide, setup, fold
         old_area = cv2.contourArea(cv2.convexHull(old_pixels)) if old_pixels is not None else 0
         old_span = np.ptp(old_pixels, axis=0)/[1920, 1080] if old_pixels is not None else np.zeros(2)
         train_mounts = [np.asarray(r["T_base_camera_mount"], float) for r in train]
-        max_tilt = max((viewing_tilt(anchor_mount, h) for h in train_mounts), default=0)
+        # The fit measures the board tilt from its first fit view, so use that
+        # same reference once it exists; before it, the saved VIEW is the proxy.
+        ref_mount = train_mounts[0] if train_mounts else anchor_mount
+        max_tilt = max((viewing_tilt(ref_mount, h) for h in train_mounts), default=0)
         covered = bool(train) and (
             np.all(np.ptp(old_pixels, axis=0)/[1920, 1080] >= quality["coverage_span_xy"]) and
             old_area/(1920*1080) >= quality["coverage_fraction"])
@@ -3040,7 +3043,7 @@ def collect_guided_views(camera, controller, planner, anchor, guide, setup, fold
             travel = np.linalg.norm(item["target"][:3, 3]-np.asarray(rec["T_base_flange"])[:3, 3])
             turn = rotation_error(item["mount"], rigid(rec["T_base_camera_mount"]))
             score -= .8*travel+3*turn  # Prefer nearby useful poses over opposite extremes.
-            tilt = viewing_tilt(item["mount"], anchor_mount)
+            tilt = viewing_tilt(item["mount"], ref_mount)
             if role == "fit" and covered and max_tilt < 15:
                 # The fit gate needs >=15 deg of out-of-plane board tilt. Once the
                 # image-coverage targets are met, prefer poses that supply it
@@ -3084,7 +3087,7 @@ def collect_guided_views(camera, controller, planner, anchor, guide, setup, fold
         mounts = [np.asarray(r["T_base_camera_mount"]) for r in train]
         translation = float(np.linalg.norm(np.ptp([h[:3, 3] for h in mounts], axis=0)))
         angular = max((rotation_error(mounts[0], h) for h in mounts), default=0)
-        tilt = max((viewing_tilt(anchor_mount, h) for h in mounts), default=0)
+        tilt = max((viewing_tilt(mounts[0], h) for h in mounts), default=0)
         rotations = np.array([rotation_vector(a[:3, :3].T@b[:3, :3])
                               for a, b in itertools.combinations(mounts, 2)])
         singular = np.linalg.svd(rotations, compute_uv=False) if len(rotations) else np.zeros(3)
