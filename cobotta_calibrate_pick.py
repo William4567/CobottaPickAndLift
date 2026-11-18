@@ -48,7 +48,7 @@ CONFIG_TEMPLATE = {
 }
 PROJECT_FILES = ("bcapclient.py", "variant.py", "orinexception.py", "http_camera.py",
                  "detect_blue.py", "cobotta_calibrate_pick.py", "automatic_setup.json",
-                 "config.example.json", "charuco-7x5.pdf", "charuco-7x5-letter.pdf",
+                 "config.json", "charuco-7x5.pdf", "charuco-7x5-letter.pdf",
                  "collision_assets/factory_camera_J5_envelope.stl",
                  "collision_assets/stock_gripper_body_F_envelope.stl")
 
@@ -78,6 +78,20 @@ def _find_project_directory():
                     candidates.append(script.parent)
             except OSError:
                 continue
+    # Last resort: a bounded walk of the user profile, so a clone anywhere
+    # under the user folder is found. Skip the large or irrelevant folders.
+    skip = {"AppData", ".git", ".hg", ".svn", "node_modules", "__pycache__",
+            "sessions", "calibrations", "backups", "vendor", "venv", ".venv"}
+    for base, dirs, files in os.walk(home, onerror=lambda exc: None):
+        try:
+            depth = len(Path(base).relative_to(home).parts)
+        except ValueError:
+            continue
+        dirs[:] = [name for name in dirs if name not in skip and not name.startswith(".")]
+        if depth >= 4:
+            dirs[:] = []
+        if "cobotta_calibrate_pick.py" in files:
+            candidates.append(Path(base))
     seen, found = set(), []
     for folder in candidates:
         try:
@@ -112,16 +126,10 @@ def _config_help(fields):
 
 def _load_config():
     if not CONFIG_FILE.is_file():
-        try:
-            CONFIG_FILE.write_text(json.dumps(CONFIG_TEMPLATE, indent=2) + "\n",
-                                   encoding="utf-8")
-        except OSError as exc:
-            raise SystemExit("Could not create the configuration file:\n  " +
-                             str(CONFIG_FILE) + "\n" + str(exc))
         raise SystemExit(
-            "Created a configuration file with placeholders:\n  " + str(CONFIG_FILE) +
-            "\nSet robot_ip, camera_ip, camera_username and camera_password in that "
-            "file, then run the program again. See guide.md.")
+            "config.json is missing from the project folder:\n  " + str(CONFIG_FILE) +
+            "\nRestore the placeholder copy from the repository with:\n  "
+            "git checkout -- config.json\nThen edit it (see guide.md).")
     try:
         config = json.loads(CONFIG_FILE.read_text(encoding="utf-8-sig"))
     except ValueError as exc:

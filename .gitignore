@@ -10,7 +10,6 @@ __pycache__/
 
 # User-installed dependencies and local secrets
 vendor/
-config.json
 captures/
 
 # Stop latch and temporary files

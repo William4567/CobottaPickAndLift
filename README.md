@@ -34,10 +34,10 @@ entirely under your user profile.
    Skip this if RoboDK's Python already has OpenCV 4.5.5 and numpy 1.25.
 3. In RoboDK: **File > Open** `cobotta_calibrate_pick.py` so it becomes a
    Python item, with `C:\RoboDK\Python-Embedded\python.exe` as interpreter.
-4. Run the item once. It creates **one config file in the clone folder**,
-   `config.json` next to the script. Edit `robot_ip`, `camera_ip`,
-   `camera_username` and `camera_password`, then run again. The file is
-   git-ignored, so your settings are never committed.
+4. Edit **`config.json` in the clone** — it ships with placeholders. Set
+   `robot_ip`, `camera_ip`, `camera_username` and `camera_password`, then run.
+   `config.json` is tracked so every clone has it; after you fill it in, do not
+   commit it (restore the placeholders with `git checkout -- config.json`).
 5. Choose a mode from the dropdown: `status`, `set-view`, `calibrate`,
    `preview`, `pick` (plus `board` and `instructions`).
 
@@ -52,7 +52,7 @@ Full instructions, field descriptions and troubleshooting:
 | `bcapclient.py`, `variant.py`, `orinexception.py` | DENSO b-CAP transport |
 | `http_camera.py`, `detect_blue.py` | Camera snapshot and blue-cube detection |
 | `automatic_setup.json` | Verified robot/gripper/board/quality/collision setup |
-| `config.example.json` | Reference copy of the generated config file |
+| `config.json` | Robot and camera settings; edit it, then reset before committing |
 | `guide.md` | Setup, configuration and troubleshooting |
 | `collision_assets/` | Hash-locked camera and gripper envelopes |
 | `charuco-7x5.pdf`, `charuco-7x5-letter.pdf` | Calibration targets |

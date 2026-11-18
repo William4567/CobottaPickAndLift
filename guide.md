@@ -1,7 +1,7 @@
 # Setup guide
 
-This is the only guide you need. There is **one config file**, in the
-repository folder; the program creates it for you on the first run.
+This is the only guide you need. There is **one config file**, `config.json`,
+in the repository folder. It ships with placeholders; edit it before running.
 
 ## What you need
 
@@ -19,9 +19,6 @@ Clone it under your user folder, for example:
 
     C:\Users\<you>\Documents\cobottaPickAndLift
 
-The program searches for the folder automatically. If you keep it somewhere
-unusual, see the troubleshooting section.
-
 ## 2. Install the Python packages (no admin)
 
 If RoboDK's Python already has OpenCV 4.5.5 and numpy 1.25, skip this step.
@@ -33,21 +30,9 @@ The program puts `vendor\` first on the Python path, so nothing under
 `C:\RoboDK` is modified. This needs internet access and writes only inside the
 repository.
 
-## 3. First run: create the config file
+## 3. Edit config.json
 
-1. In RoboDK: **File > Open** → select `cobotta_calibrate_pick.py` so it becomes
-   a Python item. Set the interpreter to
-   `C:\RoboDK\Python-Embedded\python.exe`.
-2. Run the item once. It creates `config.json` **in the repository folder**,
-   next to the script:
-
-       C:\Users\<you>\Documents\cobottaPickAndLift\config.json
-
-   and stops, printing that path.
-
-## 4. Edit the config file
-
-Open the file and fill in these fields:
+Open `config.json` in the clone (it is already there, with placeholders):
 
 | Field | Set it to |
 | --- | --- |
@@ -63,12 +48,19 @@ Leave these unless you changed the cell:
 - `observation` — the program fills it when you run `set-view`
 - `vision` — colour/ROI defaults; edit only if cube detection needs it
 
-`config.json` is in the repository but is **git-ignored**, so your IPs and
-password are never committed. Do not share it.
+`config.json` is **tracked** with placeholders so every clone has it. After you
+put your real values in it, **do not commit it**. To restore the placeholders
+before contributing:
 
-## 5. Run
+    git checkout -- config.json
 
-Run the Python item again and choose a mode from the dropdown:
+Your filled-in copy stays on your machine.
+
+## 4. Run
+
+In RoboDK: **File > Open** `cobotta_calibrate_pick.py` so it becomes a Python
+item, with `C:\RoboDK\Python-Embedded\python.exe` as interpreter, then run it
+and choose a mode from the dropdown:
 
 1. `status` — reads the controller, no motion. Check the robot and camera.
 2. `set-view` — saves the current robot pose as VIEW (no motion).
@@ -79,18 +71,23 @@ Run the Python item again and choose a mode from the dropdown:
 The first calibration needs a VIEW: run `set-view` first. `calibrate` stops
 with a clear message if no VIEW is saved.
 
-## Troubleshooting
+Alternative, fully deterministic run (it finds the folder from the script):
 
-**"Created a configuration file with placeholders"**
-Normal on the first run. Edit the `config.json` it prints and run again.
+    cd C:\Users\<you>\Documents\cobottaPickAndLift
+    "C:\RoboDK\Python-Embedded\python.exe" cobotta_calibrate_pick.py
+
+## Troubleshooting
 
 **"Fields to set: ..."**
 One or more placeholders are still in `config.json`. Fill them in.
 
+**"config.json is missing from the project folder"**
+Restore it with `git checkout -- config.json`.
+
 **"COBOTTA project folder not found"**
-The program could not find the cloned folder (RoboDK runs a temporary copy of
-the script). Clone it under Documents/Desktop/Downloads, or set the path once
-near the top of `cobotta_calibrate_pick.py`:
+RoboDK runs a temporary copy of the script, so it searches for the clone. If
+it cannot find it, set the path once near the top of
+`cobotta_calibrate_pick.py`:
 
     PROJECT_DIRECTORY = r"C:\Users\<you>\Documents\cobottaPickAndLift"
 
