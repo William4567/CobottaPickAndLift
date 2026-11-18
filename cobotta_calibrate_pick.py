@@ -405,6 +405,18 @@ def rotation_error(a, b):
     return float(np.linalg.norm(rotation_vector(a[:3, :3].T @ b[:3, :3]))*180/math.pi)
 
 
+def viewing_tilt(a, b):
+    """Out-of-plane tilt in degrees between two camera-mount poses.
+
+    The camera looks along the mount z axis (1.2 deg in the accepted
+    calibration), so the angle between those axes is the board tilt the fit
+    sees. In-plane roll, which counts in rotation_error(), does not count here:
+    it leaves the intrinsics as weakly constrained as a translation.
+    """
+    a, b = np.asarray(a, float), np.asarray(b, float)
+    return math.degrees(math.acos(float(np.clip(np.dot(a[:3, 2], b[:3, 2]), -1.0, 1.0))))
+
+
 def mean_transform(hs):
     u, _, vt = np.linalg.svd(sum(h[:3, :3] for h in hs))
     r = u @ np.diag([1, 1, np.linalg.det(u @ vt)]) @ vt
@@ -2969,6 +2981,15 @@ def collect_guided_views(camera, controller, planner, anchor, guide, setup, fold
     largest_pair = max(rotation_error(a["mount"], b["mount"]) for a, b in itertools.combinations(pool, 2))
     require(largest_pair >= 15,
             "Prepared visible poses lack 15 degrees of rotation variation; no calibration sweep started")
+    # The fit measures board tilt from the first accepted view, not rotation in
+    # general. Roll about the optical axis passes the checks above but leaves
+    # the intrinsics as weakly constrained as translation, so require a pose
+    # that actually tilts the board relative to the saved VIEW.
+    anchor_mount = np.asarray(anchor["T_base_camera_mount"], float)
+    reachable_tilt = max(viewing_tilt(anchor_mount, item["mount"]) for item in pool)
+    require(reachable_tilt >= 15,
+            "Prepared visible poses lack 15 degrees of board tilt from the saved VIEW; "
+            "intrinsics would be weakly constrained. No calibration sweep started")
     rotations = np.array([rotation_vector(a["mount"][:3, :3].T@b["mount"][:3, :3])
                           for a, b in itertools.combinations(pool, 2)])
     singular = np.linalg.svd(rotations, compute_uv=False)
@@ -2990,6 +3011,11 @@ def collect_guided_views(camera, controller, planner, anchor, guide, setup, fold
         old_pixels = np.concatenate([np.asarray(r["corners_px"], np.float32) for r in train]) if train else None
         old_area = cv2.contourArea(cv2.convexHull(old_pixels)) if old_pixels is not None else 0
         old_span = np.ptp(old_pixels, axis=0)/[1920, 1080] if old_pixels is not None else np.zeros(2)
+        train_mounts = [np.asarray(r["T_base_camera_mount"], float) for r in train]
+        max_tilt = max((viewing_tilt(anchor_mount, h) for h in train_mounts), default=0)
+        covered = bool(train) and (
+            np.all(np.ptp(old_pixels, axis=0)/[1920, 1080] >= quality["coverage_span_xy"]) and
+            old_area/(1920*1080) >= quality["coverage_fraction"])
         ranked = []
         for item in pool:
             prediction = guide.prediction(rec, item["target"])
@@ -3014,6 +3040,12 @@ def collect_guided_views(camera, controller, planner, anchor, guide, setup, fold
             travel = np.linalg.norm(item["target"][:3, 3]-np.asarray(rec["T_base_flange"])[:3, 3])
             turn = rotation_error(item["mount"], rigid(rec["T_base_camera_mount"]))
             score -= .8*travel+3*turn  # Prefer nearby useful poses over opposite extremes.
+            tilt = viewing_tilt(item["mount"], anchor_mount)
+            if role == "fit" and covered and max_tilt < 15:
+                # The fit gate needs >=15 deg of out-of-plane board tilt. Once the
+                # image-coverage targets are met, prefer poses that supply it
+                # instead of more redundant centred views.
+                score += 12*tilt
             ranked.append((score, item, prediction))
         ranked.sort(key=lambda x: x[0], reverse=True)
         chosen = None
@@ -3052,6 +3084,7 @@ def collect_guided_views(camera, controller, planner, anchor, guide, setup, fold
         mounts = [np.asarray(r["T_base_camera_mount"]) for r in train]
         translation = float(np.linalg.norm(np.ptp([h[:3, 3] for h in mounts], axis=0)))
         angular = max((rotation_error(mounts[0], h) for h in mounts), default=0)
+        tilt = max((viewing_tilt(anchor_mount, h) for h in mounts), default=0)
         rotations = np.array([rotation_vector(a[:3, :3].T@b[:3, :3])
                               for a, b in itertools.combinations(mounts, 2)])
         singular = np.linalg.svd(rotations, compute_uv=False) if len(rotations) else np.zeros(3)
@@ -3063,19 +3096,21 @@ def collect_guided_views(camera, controller, planner, anchor, guide, setup, fold
                     "collection_elapsed_seconds": time.monotonic()-collection_started,
                     "training_coverage": float(coverage), "mount_translation_span_mm": translation,
                     "mount_rotation_from_first_fit_deg": angular,
+                    "mount_tilt_from_first_fit_deg": tilt,
                     "mount_rotation_excitation_singular_values": singular.tolist()}
         write_json(folder/"guided_collection_progress.json", progress)
         log("Guided collection: fit %d/%d; check %d/%d; image spans %s (need %s); "
-            "sensor-area coverage %.1f%% (need %.1f%%; NOT completion); elapsed %.1f min" %
+            "sensor-area coverage %.1f%% (need %.1f%%; NOT completion); board tilt %.1f deg "
+            "(need 15.0); elapsed %.1f min" %
             (len(train), quality["min_fit"], len(checks), quality["min_check"],
              np.round(span, 3).tolist(), quality["coverage_span_xy"], 100*coverage,
-             100*quality["coverage_fraction"], (time.monotonic()-collection_started)/60))
+             100*quality["coverage_fraction"], tilt, (time.monotonic()-collection_started)/60))
         complete = (len(train) >= quality["min_fit"] and len(checks) >= quality["min_check"] and
                     np.all(span >= quality["coverage_span_xy"]) and coverage >= quality["coverage_fraction"] and
-                    translation >= 25 and angular >= 15 and excitation)
+                    translation >= 25 and angular >= 15 and tilt >= 15 and excitation)
         if complete:
             break
-    require(complete, "Checked visible-pose collection did not reach count/coverage/excitation needs. "
+    require(complete, "Checked visible-pose collection did not reach count/coverage/tilt/excitation needs. "
             "Stopped; see guided_collection_progress.json. No quality thresholds were relaxed.")
     return records
 
