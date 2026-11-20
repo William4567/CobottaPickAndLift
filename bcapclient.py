@@ -563,6 +563,9 @@ class BCAPClient:
                            HResult.E_INVALIDPACKET):
           self._dead = True
         raise
+      except (ValueError, struct.error) as exc:
+        self._dead = True
+        raise ORiNException(HResult.E_INVALIDPACKET) from exc
 
       if self._serial >= 0xFFFF:
         self._serial  = 1
@@ -747,6 +750,9 @@ class BCAPClient:
       len_recv = struct.unpack("<I", buf_tmp)
       buf_all  = b''.join([buf_all, buf_tmp])
 
+      if len_recv[0] < 16:
+        raise ORiNException(HResult.E_INVALIDPACKET)
+
       buf_tmp = self._recv_with_select(len_recv[0] - 5)
       buf_all = b''.join([buf_all, buf_tmp])
 
@@ -766,7 +772,7 @@ class BCAPClient:
       if len(reads) == 0:
         raise ORiNException(HResult.E_TIMEOUT)
 
-      buf_tmp = self._sock.recv(len_recv)
+      buf_tmp = self._sock.recv(len_recv - len(buf_recv))
       if not buf_tmp:
         raise ORiNException(HResult.E_NOT_CONNECTED)
       buf_recv = b''.join([buf_recv, buf_tmp])

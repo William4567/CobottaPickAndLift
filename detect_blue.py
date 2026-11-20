@@ -9,13 +9,16 @@ import json
 import math
 import os
 from pathlib import Path
+import sys
 import time
+
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "vendor"))
 
 import cv2
 import numpy as np
 from http_camera import HTTPCamera
-
-ROOT = Path(__file__).resolve().parent
 
 
 def blue_mask(frame, config, glare_profile=None):

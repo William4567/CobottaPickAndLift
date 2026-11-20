@@ -16,6 +16,3 @@ captures/
 STOP_COBOTTA
 *.tmp
 .env
-
-# Internal handoff notes (never published)
-docs/HANDOFF_FOR_NEW_CHAT.md

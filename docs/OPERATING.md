@@ -9,7 +9,7 @@ Run modes from `cobotta_calibrate_pick.py` in this order:
 1. `status` — Read controller state, frames, external overrides, and `OutRange` without moving the robot or camera.
 2. `set-view` — Preview the camera at the robot's current pose and save that pose as `VIEW` in `config.json`. Does not move the arm; opens the gripper only if it is not already open/empty, after confirmation.
 3. `calibrate` — Measure local image response, frame the printed ChArUco sheet, collect fit/check views, solve intrinsics/hand-eye/table calibration, register the paper boundary, and save the accepted calibration.
-4. `preview` — Capture at `VIEW`, detect and fit the cube, and compute a collision-checked pick plan without moving the arm.
+4. `preview` — Capture at `VIEW`, detect and fit the cube, and compute a collision-checked pick plan without moving the arm; calls `ensure_gripper_open()` first (requiring `@SERVO_ON` and operator confirmation if the gripper is not already open/empty).
 5. `pick` — Execute the full pick, lift, and return to `VIEW` holding the cube.
 
 Two helper modes require no robot or camera connection: `board` opens `charuco-7x5-letter.pdf`, and `instructions` opens this file.
@@ -49,7 +49,7 @@ Calibration temporarily requests Windows idle-sleep prevention (`SetThreadExecut
 
 Remove the calibration board and place one blue cube (`25 x 25 x 25 mm`) on the calibrated table inside the calibrated image hull and at least `5 mm` inside the registered paper boundary.
 
-- **`preview`**: Requires the arm at `VIEW`. Captures two fresh images `0.3 s` apart, verifies cube localization repeatability (`< 0.8 mm`, `< 3 deg`), fits the cube top-face silhouette (`RMS <= 1.0 mm`, `IoU >= 0.85`), and solves a full pick/lift/return plan without moving the arm.
+- **`preview`**: Calls `ensure_gripper_open()` at the current pose (requiring `@SERVO_ON` and operator confirmation if the gripper is not already open/empty) and requires the arm at `VIEW`. Captures two fresh images `0.3 s` apart, verifies cube localization repeatability (`< 0.8 mm`, `< 3 deg`), fits the cube top-face silhouette (`RMS <= 1.0 mm`, `IoU >= 0.85`), and solves a full pick/lift/return plan without moving the arm.
 - **`pick`**: Opens and verifies the empty gripper at the current pose, moves to `VIEW`, captures and plans the pick, captures one final fresh image (`pick_final_fresh_check`) to confirm the cube did not shift during planning, then executes approach, vertical descent, `6 N` grip (`HandMoveH`), grip-width check (`25 ± 1.5 mm`), vertical lift (`lift_mm`), and held return to `VIEW`. The cube remains held at `VIEW`.
 
 ## Collision checking and planning notes
@@ -60,4 +60,9 @@ Remove the calibration board and place one blue cube (`25 x 25 x 25 mm`) on the 
 
 ## Session outputs
 
-Every run writes a timestamped folder under `sessions/<timestamp>_<mode>/` containing captured `.jpg` snapshots, `.png` overlays, `observations.json`, route JSONs, `timings.json`, `speed_report.json`, `motor_readiness.json`, `planning_diagnostics.json`, and (on any stop or exception) `failure.json`.
+Session artifacts depend on the selected mode:
+
+- `status` writes `sessions/<timestamp>_status.json`.
+- `board` and `instructions` write nothing under `sessions/`.
+- `set-view` writes `sessions/<timestamp>_set_view/` containing the preview capture, `new_view.json`, and (if the gripper had to be opened) `startup_gripper_open.json`.
+- `calibrate`, `preview`, and `pick` write `sessions/<timestamp>_<mode>/` containing captured `.jpg` snapshots, `.png` overlays, and mode-specific outputs: `timings.json`, `speed_report.json`, `motor_readiness.json` on motion runs (`calibrate` and `pick`), `observations.json` and route JSONs on `calibrate`, `pick_plan.json` and `planning_diagnostics.json` on `preview` and `pick`, `startup_gripper_open.json` on `pick` (and on `preview` if the gripper had to be opened), and `failure.json` on any stop or exception.

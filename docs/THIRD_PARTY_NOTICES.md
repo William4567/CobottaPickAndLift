@@ -37,8 +37,9 @@ publishing or redistributing it.
 
 ## Printed ChArUco board
 
-`charuco-7x5.pdf` and `charuco-7x5-letter.pdf` are
-generated from OpenCV's ChArUco board implementation (OpenCV 4.5.5, Apache-2.0):
+`charuco-7x5.pdf` is the user-supplied CalibrX 7x5 board matching OpenCV 4.5.5
+ChArUco coordinates (Apache-2.0), and `charuco-7x5-letter.pdf` places the same
+board on US Letter:
 
     https://opencv.org/license/
 

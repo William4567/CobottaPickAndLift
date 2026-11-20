@@ -159,6 +159,8 @@ def _load_config():
         config = json.loads(CONFIG_FILE.read_text(encoding="utf-8-sig"))
     except ValueError as exc:
         _stop("Could not read " + str(CONFIG_FILE) + ": " + str(exc))
+    if not isinstance(config, dict):
+        _stop("Could not read " + str(CONFIG_FILE) + ": expected a JSON object")
     template = copy.deepcopy(CONFIG_TEMPLATE)
     for key, value in template.items():
         if key not in config:
@@ -320,22 +322,26 @@ def write_json(path, data, backup=False):
     path.parent.mkdir(parents=True, exist_ok=True)
     text = json.dumps(data, indent=2, allow_nan=False)
     tmp = path.with_name(path.name + "." + stamp() + ".tmp")
-    tmp.write_text(text + "\n", encoding="utf-8")
-    try:
-        if backup and path.exists():
-            shutil.copy2(path, path.with_name(path.stem + ".backup_" + stamp() + path.suffix))
-        # OneDrive/antivirus scanners on Windows can briefly hold a handle on
-        # recently created files, causing os.replace() to fail with WinError 5/32.
-        delays = (0.02, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6)
+    # OneDrive/antivirus scanners on Windows can briefly hold a handle on
+    # recently created files, causing file operations to fail with WinError 5/32.
+    delays = (0.02, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6)
+
+    def _retry(action):
         for attempt in range(len(delays) + 1):
             try:
-                os.replace(tmp, path)
-                return
+                return action()
             except OSError as exc:
                 transient = isinstance(exc, PermissionError) or getattr(exc, "winerror", None) in (5, 32)
                 if not transient or attempt == len(delays):
                     raise
                 time.sleep(delays[attempt])
+
+    try:
+        tmp.write_text(text + "\n", encoding="utf-8")
+        if backup and path.exists():
+            backup_path = path.with_name(path.stem + ".backup_" + stamp() + path.suffix)
+            _retry(lambda: shutil.copy2(path, backup_path))
+        _retry(lambda: os.replace(tmp, path))
     finally:
         try:
             if tmp.exists():
@@ -511,6 +517,12 @@ def show_image(frame, label):
     cv2.rectangle(frame, (0, 0), (frame.shape[1], 65), (0, 0, 0), -1)
     cv2.putText(frame, label[:135], (12, 38), cv2.FONT_HERSHEY_SIMPLEX,
                 0.65, (255, 255, 255), 2)
+    if _WINDOW_READY:
+        try:
+            if cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:
+                _WINDOW_READY = False
+        except cv2.error:
+            _WINDOW_READY = False
     if not _WINDOW_READY:
         cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(WINDOW, 1152, 648)
@@ -987,6 +999,8 @@ class Controller:
             actions.append(lambda: self.client.controller_disconnect(self.ctrl))
         if self.started:
             actions.append(self.client.service_stop)
+        if self.client is not None:
+            actions.append(self.client.close)
         for action in actions:
             try:
                 action()
@@ -3112,6 +3126,10 @@ def collect_guided_views(camera, controller, planner, anchor, guide, setup, fold
             turn = rotation_error(item["mount"], rigid(rec["T_base_camera_mount"]))
             score -= .8*travel+3*turn  # Prefer nearby useful poses over opposite extremes.
             tilt = viewing_tilt(item["mount"], ref_mount)
+            if not train:
+                # Keep the first fit shot (the tilt reference for both guided
+                # collection and fit_calibration) near-flat like anchor.
+                score -= 10*viewing_tilt(item["mount"], anchor_mount)
             if role == "fit" and covered and max_tilt < 15:
                 # The fit gate needs >=15 deg of out-of-plane board tilt. Once the
                 # image-coverage targets are met, prefer poses that supply it
