@@ -9,6 +9,7 @@ T_A_B maps coordinates expressed in B into A. F is physical J6; M is stock J5.
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import itertools
 import json
@@ -20,8 +21,11 @@ import signal
 import sys
 import time
 import traceback
+import urllib.error
 from contextlib import contextmanager
 from datetime import datetime, timezone
+
+from robodk import robolink, robomath, robodialogs
 
 # One configuration file holds every user setting and the run state (saved
 # VIEW, accepted calibration binding). It lives in the repository folder next
@@ -145,17 +149,18 @@ def _load_config():
         config = json.loads(CONFIG_FILE.read_text(encoding="utf-8-sig"))
     except ValueError as exc:
         _stop("Could not read " + str(CONFIG_FILE) + ": " + str(exc))
-    for key, value in CONFIG_TEMPLATE.items():
+    template = copy.deepcopy(CONFIG_TEMPLATE)
+    for key, value in template.items():
         if key not in config:
-            config[key] = value
+            config[key] = copy.deepcopy(value)
     if not isinstance(config.get("observation"), dict):
-        config["observation"] = dict(CONFIG_TEMPLATE["observation"])
-    for key, value in CONFIG_TEMPLATE["observation"].items():
-        config["observation"].setdefault(key, value)
+        config["observation"] = copy.deepcopy(template["observation"])
+    for key, value in template["observation"].items():
+        config["observation"].setdefault(key, copy.deepcopy(value))
     if not isinstance(config.get("vision"), dict):
-        config["vision"] = dict(CONFIG_TEMPLATE["vision"])
-    for key, value in CONFIG_TEMPLATE["vision"].items():
-        config["vision"].setdefault(key, value)
+        config["vision"] = copy.deepcopy(template["vision"])
+    for key, value in template["vision"].items():
+        config["vision"].setdefault(key, copy.deepcopy(value))
     placeholders = {"robot_ip": "ROBOT_IP", "camera_ip": "CAMERA_IP",
                     "camera_username": "CAMERA_USER",
                     "camera_password": "CAMERA_PASSWORD"}
@@ -168,7 +173,7 @@ def _load_config():
 
 ROOT = _find_project_directory()
 CONFIG_FILE = ROOT/CONFIG_NAME
-CONFIG = _load_config()
+CONFIG = None
 # Optional, user-installed dependency folder (no administrator rights):
 #   python -m pip install --target <clone>\vendor numpy==1.25.2 opencv-contrib-python==4.5.5.64
 sys.path.insert(0, str(ROOT))
@@ -176,7 +181,6 @@ sys.path.insert(0, str(ROOT/"vendor"))
 
 import cv2
 import numpy as np
-from robodk import robolink, robomath, robodialogs
 
 from bcapclient import BCAPClient
 from http_camera import HTTPCamera
@@ -455,7 +459,7 @@ def check_stop(pump=False):
         return
     _LAST_STOP_CHECK = now
     key = cv2.waitKey(1) & 0xFF
-    if key in (27, ord("q")):
+    if key in (27, ord("q"), ord("Q")):
         STOP = True
         STOP_REASON = "Esc in camera window" if key == 27 else "Q in camera window"
     if (ROOT / "STOP_COBOTTA").exists():
@@ -902,14 +906,16 @@ class Controller:
         TIMINGS.add("controller.move_joint.command_issue", time.perf_counter()-command_started)
         begin = time.monotonic()
         polling_started = time.perf_counter()
+        saw_busy = False
         try:
             while time.monotonic()-begin < 120:
                 self.check_motion_state()
                 q = np.asarray(self.var("@CURRENT_ANGLE"))[:6]
                 busy = self.var("@BUSY_STATUS")
+                saw_busy = saw_busy or bool(busy)
                 require(np.all(q >= np.minimum(q0, q1)-0.5) and
                         np.all(q <= np.maximum(q0, q1)+0.5), "Joint motion left planned interval")
-                if not busy and np.max(np.abs(q-q1)) <= 0.20:
+                if not busy and (saw_busy or time.monotonic()-begin >= 0.25) and np.max(np.abs(q-q1)) <= 0.20:
                     return
                 if not busy and time.monotonic()-begin > 2:
                     raise RuntimeError("Controller stopped before reaching waypoint")
@@ -984,9 +990,16 @@ class Camera:
             with TIMINGS.phase("camera.frame.http_capture"):
                 try:
                     data = self.http.capture()
-                except TimeoutError as exc:
-                    raise TimeoutError(f"Camera snapshot {label} timed out "
-                                       f"({self.http.timeout:g} s socket timeout)") from exc
+                except (TimeoutError, urllib.error.URLError) as exc:
+                    if isinstance(exc, TimeoutError) or (
+                        isinstance(exc, urllib.error.URLError) and (
+                            isinstance(exc.reason, TimeoutError) or
+                            "timed out" in str(exc.reason).lower()
+                        )
+                    ):
+                        raise TimeoutError(f"Camera snapshot {label} timed out "
+                                           f"({self.http.timeout:g} s socket timeout)") from exc
+                    raise
             prefix.with_suffix(".jpg").write_bytes(data)
             with TIMINGS.phase("camera.frame.decode"):
                 frame = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
@@ -1165,6 +1178,7 @@ class Planner:
         # route search got, and which fallback connected. Written by run_pick.
         self.planning_notes = []
         self.last_rrt_candidates = 0
+        self.items, self.moving = [], []
         if rdk.RunMode() != robolink.RUNMODE_SIMULATE:
             rdk.setRunMode(robolink.RUNMODE_SIMULATE)
         # Rendering is disabled while planning: collision checking uses item poses,
@@ -1172,54 +1186,53 @@ class Planner:
         # makes the simulated arm jump through random RRT configurations.
         # close() restores rendering. Nothing about the checks changes.
         rdk.Render(False)
-        log("RoboDK is used for simulated planning (rendering off while planning). "
-            "Physical calibrate/pick motion uses b-CAP after confirmation.")
-        self.robot = rdk.Item(setup["robot"], robolink.ITEM_TYPE_ROBOT)
-        require(self.robot.Valid(), "Robot not found: " + setup["robot"])
-        self.role_by_name[str(self.robot.Name())] = "robot"
-        log("Planning station: " + rdk.ActiveStation().Name())
-        require(len(rdk.ItemList(robolink.ITEM_TYPE_ROBOT)) == 1,
-                "Use a station containing only the intended COBOTTA robot")
-        self.base_world = np.asarray(self.robot.PoseAbs().rows)
-        low, high, _ = self.robot.JointLimits()
-        # Published nominal limits narrow the search, never widen station/controller limits.
-        self.low = np.maximum(np.asarray(low.list())[:6], [-150, -60, 18, -170, -95, -170])
-        self.high = np.minimum(np.asarray(high.list())[:6], [150, 100, 140, 170, 135, 170])
-        self.items, self.moving = [], []
-        self.camera_item = None
-        self.cache = {}
-        self.rejection_reason = ""
-        self.held_box = None
-        self.target_cube = None
-        self.target_pose = None
-        self.table = table
-        self.workspace = workspace
-        self.grasp_tcp = rigid(grasp_tcp) if grasp_tcp is not None else None
-        self.rng = np.random.default_rng(47833)
-        self.margin = float(setup["planning"]["margin_mm"])
-        self.step = float(setup["planning"]["joint_sample_deg"])
-        require(0 < self.step <= 0.5 and self.margin >= 2, "Invalid collision sampling/margin")
-        require(np.all(self.low < self.high), "Robot model joint limits are invalid")
-        state = controller.stable()
-        self.T_model_physical = np.eye(4)
-        self.bind_model_reference(state)
-        controller.bind_reference(self, state)
-        self.calibration_anchor_xy = None
-        if self.workspace is None:
-            # User's paper extends 70 mm left, 140 right, 40 behind, 240 forward
-            # from VIEW's gripper projection. A 35 mm disk (40 minus 5 margin)
-            # fits that rectangle without guessing the operator-to-base axis signs.
-            self.grasp_tcp = grasp_transform(setup)
-            saved_q = controller.cfg["observation"]["joints"][:6]
-            self.calibration_anchor_xy = (self.fk(saved_q) @ self.grasp_tcp)[:2, 3]
-        self.sync_check(state)
-        self.purge_stale_generated_items()
         try:
+            log("RoboDK is used for simulated planning (rendering off while planning). "
+                "Physical calibrate/pick motion uses b-CAP after confirmation.")
+            self.robot = rdk.Item(setup["robot"], robolink.ITEM_TYPE_ROBOT)
+            require(self.robot.Valid(), "Robot not found: " + setup["robot"])
+            self.role_by_name[str(self.robot.Name())] = "robot"
+            log("Planning station: " + rdk.ActiveStation().Name())
+            require(len(rdk.ItemList(robolink.ITEM_TYPE_ROBOT)) == 1,
+                    "Use a station containing only the intended COBOTTA robot")
+            self.base_world = np.asarray(self.robot.PoseAbs().rows)
+            low, high, _ = self.robot.JointLimits()
+            # Published nominal limits narrow the search, never widen station/controller limits.
+            self.low = np.maximum(np.asarray(low.list())[:6], [-150, -60, 18, -170, -95, -170])
+            self.high = np.minimum(np.asarray(high.list())[:6], [150, 100, 140, 170, 135, 170])
+            self.camera_item = None
+            self.cache = {}
+            self.rejection_reason = ""
+            self.held_box = None
+            self.target_cube = None
+            self.target_pose = None
+            self.table = table
+            self.workspace = workspace
+            self.grasp_tcp = rigid(grasp_tcp) if grasp_tcp is not None else None
+            self.rng = np.random.default_rng(47833)
+            self.margin = float(setup["planning"]["margin_mm"])
+            self.step = float(setup["planning"]["joint_sample_deg"])
+            require(0 < self.step <= 0.5 and self.margin >= 2, "Invalid collision sampling/margin")
+            require(np.all(self.low < self.high), "Robot model joint limits are invalid")
+            state = controller.stable()
+            self.T_model_physical = np.eye(4)
+            self.bind_model_reference(state)
+            controller.bind_reference(self, state)
+            self.calibration_anchor_xy = None
+            if self.workspace is None:
+                # User's paper extends 70 mm left, 140 right, 40 behind, 240 forward
+                # from VIEW's gripper projection. A 35 mm disk (40 minus 5 margin)
+                # fits that rectangle without guessing the operator-to-base axis signs.
+                self.grasp_tcp = grasp_transform(setup)
+                saved_q = controller.cfg["observation"]["joints"][:6]
+                self.calibration_anchor_xy = (self.fk(saved_q) @ self.grasp_tcp)[:2, 3]
+            self.sync_check(state)
+            self.purge_stale_generated_items()
             self.create_geometry()
+            self.rdk.setCollisionActive(robolink.COLLISION_ON)
         except BaseException:
             self.close()
             raise
-        self.rdk.setCollisionActive(robolink.COLLISION_ON)
 
     def fk(self, q):
         return np.asarray(self.robot.SolveFK(list(map(float, q))).rows) @ self.T_model_physical
@@ -1571,7 +1584,7 @@ class Planner:
             if k % 100 == 0:
                 log("Planning joint route: %d candidates" % k)
             target = goal if k % 5 == 0 else self.rng.uniform(self.low, self.high)
-            index = int(np.argmin([np.linalg.norm(q-target) for q in nodes]))
+            index = int(np.argmin(np.linalg.norm(np.asarray(nodes)-target, axis=1)))
             d = target-nodes[index]
             length = max(float(np.linalg.norm(d)), 1e-10)
             if length <= 1e-9:
@@ -1901,8 +1914,11 @@ def fit_calibration(records, setup, folder):
             "Hand-eye rotation excitation is insufficient: rotate about at least two nonparallel axes")
     span = np.ptp(np.array([h[:3, 3] for h in bf]), axis=0)
     require(np.linalg.norm(span) >= 25, "Camera positions have insufficient translation variation")
-    normal_rot = np.array([rotation_vector(cb[0][:3, :3].T @ h[:3, :3]) for h in cb])
-    require(np.max(np.linalg.norm(normal_rot[:, :2], axis=1))*180/math.pi >= 15,
+    normal_tilts = [
+        math.degrees(math.acos(float(np.clip((cb[0][:3, :3].T @ h[:3, :3])[2, 2], -1.0, 1.0))))
+        for h in cb
+    ]
+    require(max(normal_tilts) >= 15,
             "Board tilt variation below 15 degrees; intrinsics would be weakly constrained")
     r_fc, t_fc = cv2.calibrateHandEye([h[:3, :3] for h in bf], [h[:3, 3] for h in bf],
                                      [h[:3, :3] for h in cb], [h[:3, 3] for h in cb],
@@ -1937,6 +1953,7 @@ def fit_calibration(records, setup, folder):
         denom = rays @ n
         require(np.all(np.abs(denom) > 1e-6), "Validation ray is parallel to table")
         depths = ((bb[:3, 3]-cam[:3, 3]) @ n)/denom
+        require(np.all(depths > 0), "Validation ray intersects table behind camera")
         hit = cam[:3, 3]+depths[:, None]*rays
         metric = np.linalg.norm(hit-points(bb, obj), axis=1)
         check_results.append({"label": rec["label"], "rms_px": float(np.sqrt(np.mean(reproj**2))),
@@ -2240,6 +2257,12 @@ def view_check(state, cfg):
             "VIEW flange pose changed; controller calibration/tool/work mismatch")
 
 
+def vision_settings(vision):
+    """Return vision and camera-host settings excluding credentials."""
+    return {k: v for k, v in vision.items()
+            if k not in ("camera_username", "camera_password")}
+
+
 def bind_calibration(cal, cfg, vision, setup, frames):
     require(cal["schema"] == SCHEMA and cal["quality"]["passed"], "No accepted J5 camera calibration; run calibrate")
     require(cal.get("board") == BOARD,
@@ -2247,7 +2270,11 @@ def bind_calibration(cal, cfg, vision, setup, frames):
             "25 mm square / 18 mm marker sheet before picking; old scale cannot be reused.")
     require(cal["binding"]["observation"] == cfg["observation"], "Saved VIEW changed; recalibrate")
     require(cal["binding"]["frames"] == frames, "Controller frame definitions changed")
-    require(cal["binding"]["vision_fingerprint"] == fingerprint(vision), "Vision settings changed; recalibrate")
+    if "vision_settings_fingerprint" in cal["binding"]:
+        require(cal["binding"]["vision_settings_fingerprint"] == fingerprint(vision_settings(vision)),
+                "Vision settings changed; recalibrate")
+    else:
+        require(cal["binding"]["vision_fingerprint"] == fingerprint(vision), "Vision settings changed; recalibrate")
     current_geometry = geometry_binding(setup)
     expected_hash = cal["binding"]["geometry_fingerprint"]
     if expected_hash != fingerprint(current_geometry):
@@ -2796,8 +2823,7 @@ def acquire_calibration_board(camera, controller, planner, cfg, setup, folder):
                      "collection or blind fallback started; see the fresh image and route records.")
 
 
-def capture_bounded_collection_route(camera, controller, planner, guide, rec, route, label, role, folder):
-    """Verify fresh images along the route; transit images are not fit/check data."""
+def _route_kinematics_checker(planner):
     kinematic_cache = {}
 
     def kinematics(q):
@@ -2815,6 +2841,12 @@ def capture_bounded_collection_route(camera, controller, planner, guide, rec, ro
                 np.linalg.norm(fa[:3, 3]-fb[:3, 3]) <= mm and rotation_error(fa, fb) <= deg and
                 np.linalg.norm(ma[:3, 3]-mb[:3, 3]) <= mm and rotation_error(ma, mb) <= deg)
 
+    return kinematic_cache, within
+
+
+def bounded_route_chunks(planner, route):
+    """Split a joint route into <=7 mm / 1.5 deg checkpoints along every edge."""
+    _, within = _route_kinematics_checker(planner)
     chunks = []
     for a, b in zip(route, route[1:]):
         dense = planner.samples(a, b)
@@ -2832,6 +2864,13 @@ def capture_bounded_collection_route(camera, controller, planner, guide, rec, ro
             chunks.append(dense[last].tolist())
     if not chunks:
         chunks = [list(map(float, route[-1]))]
+    return chunks
+
+
+def capture_bounded_collection_route(camera, controller, planner, guide, rec, route, label, role, folder):
+    """Verify fresh images along the route; transit images are not fit/check data."""
+    kinematic_cache, within = _route_kinematics_checker(planner)
+    chunks = bounded_route_chunks(planner, route)
     write_json(folder/(label+"_bounded_route.json"),
                {"original_route": route, "image_checkpoint_joints": chunks,
                 "max_flange_and_J5_translation_mm": 8, "max_flange_and_J5_rotation_deg": 2,
@@ -3056,11 +3095,13 @@ def collect_guided_views(camera, controller, planner, anchor, guide, setup, fold
             try:
                 route = planner.route(current["joints"], item["joints"])
                 planner.preflight(route)
+                for chunk in bounded_route_chunks(planner, route):
+                    require(guide.prediction(rec, planner.fk(chunk))["count"] >= 14,
+                            "Bounded collection route loses predicted board visibility")
                 chosen = item, prediction, route
                 break
             except ValueError as exc:
                 write_json(folder/("guided_%03d_route_rejected.json" % item["id"]), {"reason": str(exc)})
-                pool = [p for p in pool if p["id"] != item["id"]]
         require(chosen is not None, "No further predicted-visible checked calibration route remains; "
                 "stopped without trying unseen/off-image poses")
         item, prediction, route = chosen
@@ -3118,6 +3159,13 @@ def collect_guided_views(camera, controller, planner, anchor, guide, setup, fold
     return records
 
 
+def reported_paper_limits(setup):
+    """Return (left, right, behind, toward_user) paper limits in mm from setup."""
+    limits = setup["reported_paper_limits_mm"]
+    return (float(limits["left"]), float(limits["right"]),
+            float(limits["behind"]), float(limits["toward_user"]))
+
+
 def confirm_previous_workspace_return(camera, controller, planner, cfg, setup, folder):
     """A new, confirmed startup return after stopping outside the 35 mm disk."""
     state = controller.stable(powered=True, empty=True)
@@ -3144,17 +3192,19 @@ def confirm_previous_workspace_return(camera, controller, planner, cfg, setup, f
     view_check(attempts[0]["state_after"], cfg)
     require(np.linalg.norm(np.asarray(workspace["origin_base_mm"])[:2]-anchor) <= .8,
             "Previous rectangle is anchored to a different saved VIEW")
+    left, right, behind, toward_user = reported_paper_limits(setup)
     camera.frame("startup_return_confirmation", controller)
     confirm("NEW STARTUP RETURN USING YOUR PREVIOUSLY CONFIRMED PAPER RECTANGLE\n\n"
             "The current pose is outside the temporary 35 mm circle. A prior confirmed "
             "rectangle matches this saved VIEW, setup and controller frames: " + source.name + ".\n\n"
             "Confirm the paper/table boundary and its directions have NOT moved, the "
-            "measurements remain left70/right140/behind40/towards240 mm, and the swept area "
+            "measurements remain left%g/right%g/behind%g/towards%g mm, and the swept area "
             "is clear. OK authorizes a newly planned collision/controller-checked return "
             "to the existing VIEW within that same rectangle, at SPEED/ACCEL/DECEL=100 "
             "with external overrides unchanged. The temporary 35 mm probe region is "
             "restored at VIEW. No failed collection route or old response is resumed. "
-            "Cancel if anything changed or is uncertain; no return is performed.")
+            "Cancel if anything changed or is uncertain; no return is performed."
+            % (left, right, behind, toward_user))
     current = controller.stable(powered=True, empty=True)
     require(np.max(np.abs(np.asarray(current["joints"])-state["joints"])) < .05,
             "Robot moved during startup return confirmation")
@@ -3272,6 +3322,7 @@ def run_calibration(rdk, cfg, vision, setup, folder):
             write_json(folder/"observations.json", records)
             result = fit_calibration(records, setup, folder)
             result["binding"] = {"observation": cfg["observation"], "frames": controller.frames(),
+                                 "vision_settings_fingerprint": fingerprint(vision_settings(vision)),
                                  "vision_fingerprint": fingerprint(vision),
                                  "geometry_fingerprint": fingerprint(geometry_binding(setup)),
                                  "geometry": geometry_binding(setup),
@@ -3546,24 +3597,27 @@ def run_pick(rdk, cfg, vision, setup, folder, execute):
                 return
             log("Pick route prepared. Capturing final cube verification before opening the gripper.")
             # Planning may take time. Refresh perception before opening or moving away.
-            frame, rec, prefix = camera.frame("pick_final_fresh_check", controller,
-                                              before=previous_state)
+            frame, rec, prefix = camera.frame("pick_final_fresh_check", controller)
             with TIMINGS.phase("pick.locate_cube"):
                 latest, _ = locate_cube(frame, vision, cal, rec["state_after"], setup, prefix)
             require(np.linalg.norm(np.asarray(latest["centre_base_mm"])-fits[-1]["centre_base_mm"]) < .8,
                     "Cube changed during planning; discard plan")
             require(abs((latest["yaw_table_rad"]-fits[-1]["yaw_table_rad"]+math.pi/4) %
                         (math.pi/2)-math.pi/4) < math.radians(3), "Cube rotated during planning")
-            view_check(controller.stable(powered=True), cfg)
+            current = controller.stable(powered=True)
+            view_check(current, cfg)
             controller.check_frames()
             controller.check_motion_state()
             hand = setup["gripper"]
             require(setup["cube_width_mm"]+3 <= hand["open_position_mm"] <= 30,
                     "Stock opening must leave at least 3 mm above cube width and be <=30 mm")
-            log("Final cube check passed. Opening gripper to %.1f mm." % hand["open_position_mm"])
-            controller.hand("HandMoveA", [float(hand["open_position_mm"]), float(hand["open_speed_percent"]), "Next"])
-            controller.wait_hand(lambda: abs(controller.hand("HandCurPos")-hand["open_position_mm"]) < .4)
-            require(not controller.hand("HandHoldState"), "Gripper unexpectedly reports holding after opening")
+            if abs(current["hand_position"]-hand["open_position_mm"]) < .4 and not current["hand_holding"]:
+                log("Final cube check passed. Gripper already open (%.1f mm) and empty." % hand["open_position_mm"])
+            else:
+                log("Final cube check passed. Opening gripper to %.1f mm." % hand["open_position_mm"])
+                controller.hand("HandMoveA", [float(hand["open_position_mm"]), float(hand["open_speed_percent"]), "Next"])
+                controller.wait_hand(lambda: abs(controller.hand("HandCurPos")-hand["open_position_mm"]) < .4)
+                require(not controller.hand("HandHoldState"), "Gripper unexpectedly reports holding after opening")
             planner.execute(plan["to_approach"], "Approach cube", report_progress=True)
             planner.execute(plan["down"], "Descend along table normal", report_progress=True)
             controller.check_frames()
@@ -3616,6 +3670,8 @@ def save_current_view(cfg, vision, setup):
     The arm never moves. The gripper is opened only if it is not fully open,
     after the operator is told to remove any object and approves it.
     """
+    global _WINDOW_READY
+    left, right, behind, toward_user = reported_paper_limits(setup)
     folder = ROOT/"sessions"/(stamp()+"_set_view")
     camera = Camera(vision, folder)
     try:
@@ -3631,10 +3687,11 @@ def save_current_view(cfg, vision, setup):
             log("Current controller joints: " + str(after["joints"]))
             confirm("SAVE CURRENT POSE AS VIEW - no robot movement. Confirm the camera "
                     "image shows your paper and the board is visible. Your measured paper "
-                    "edges must be relative to THIS pose: 70 mm left, 140 mm right, "
-                    "40 mm behind and 240 mm toward you. The old VIEW is backed up and "
+                    "edges must be relative to THIS pose: %g mm left, %g mm right, "
+                    "%g mm behind and %g mm toward you. The old VIEW is backed up and "
                     "any previous calibration binding is invalidated. OK saves; Cancel "
-                    "leaves configuration unchanged.")
+                    "leaves configuration unchanged."
+                    % (left, right, behind, toward_user))
             latest = controller.stable(empty=True)
             require(np.max(np.abs(np.asarray(after["joints"])-latest["joints"])) < .05,
                     "Robot moved while confirming VIEW; nothing saved")
@@ -3649,6 +3706,7 @@ def save_current_view(cfg, vision, setup):
     finally:
         camera.close()
         cv2.destroyAllWindows()
+        _WINDOW_READY = False
 
 
 @contextmanager
@@ -3741,7 +3799,7 @@ def choose_operation(default_mode):
 
 
 def main(forced_mode=None):
-    global RDK, STOP, STOP_REASON, _WINDOW_READY
+    global RDK, STOP, STOP_REASON, _WINDOW_READY, CONFIG
     STOP = False
     STOP_REASON = None
     print("COBOTTA project folder:", ROOT, flush=True)
@@ -3770,9 +3828,11 @@ def main(forced_mode=None):
                     "Preview checks the cube and plan; pick requests a physical pick/lift.",
                     selected, title="COBOTTA operation")
                 if picked is None or picked is False:
-                    raise Stopped("Cancelled. No operation started.")
+                    log("Cancelled. No operation started.")
+                    return
             elif picked is False:
-                raise Stopped("Cancelled. No operation started.")
+                log("Cancelled. No operation started.")
+                return
             mode = str(picked).strip().lower()
             selected = mode
             if mode not in operations:
@@ -3786,16 +3846,17 @@ def main(forced_mode=None):
         log(str(path))
         os.startfile(str(path))
         return
+    CONFIG = _load_config()
     cfg = {"robot_ip": CONFIG["robot_ip"], "observation": CONFIG["observation"],
            "speed_percent": CONFIG["speed_percent"],
            "approach_clearance_mm": CONFIG["approach_clearance_mm"],
            "lift_mm": CONFIG["lift_mm"]}
     if CONFIG.get("calibration_v2"):
         cfg["calibration_v2"] = CONFIG["calibration_v2"]
-    vision = {"camera_ip": CONFIG["camera_ip"],
+    vision_settings_cfg = {"camera_ip": CONFIG["camera_ip"], **CONFIG.get("vision", {})}
+    vision = {**vision_settings_cfg,
               "camera_username": CONFIG["camera_username"],
               "camera_password": CONFIG["camera_password"]}
-    vision.update(CONFIG.get("vision", {}))
     setup = read_json(ROOT/"automatic_setup.json")
     require(cfg["observation"]["tool"] == 0 and cfg["observation"]["work"] == 0,
             "This workflow uses saved flange Tool 0 / base Work 0")

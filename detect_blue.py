@@ -164,7 +164,7 @@ def main():
                 break
             cv2.imshow("Blue cube detection", rendered)
             key = cv2.waitKey(1 if args.live else 0) & 0xFF
-            if not args.live or key in (27, ord("q")):
+            if not args.live or key in (27, ord("q"), ord("Q")):
                 break
             if cv2.getWindowProperty("Blue cube detection", cv2.WND_PROP_VISIBLE) < 1:
                 break

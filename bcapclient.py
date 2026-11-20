@@ -109,13 +109,23 @@ class BCAPClient:
     # unnecessary and would let a stalled controller block forever.
     self._sock.settimeout(timeout)
 
-  def __del__(self):
-    if not (self._sock is None):
+  def close(self):
+    self._dead = True
+    sock = getattr(self, "_sock", None)
+    if sock is not None:
+      self._sock = None
       try:
-        self._sock.shutdown(socket.SHUT_RDWR)
+        sock.shutdown(socket.SHUT_RDWR)
+      except OSError:
+        pass
       finally:
-        self._sock.close()
-        self._sock = None
+        try:
+          sock.close()
+        except OSError:
+          pass
+
+  def __del__(self):
+    self.close()
 
   def settimeout(self, timeout):
     self._timeout = timeout
