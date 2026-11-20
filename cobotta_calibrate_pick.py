@@ -80,11 +80,21 @@ def _find_project_directory():
              (home/"Documents"/"GitHub", 1), (home/"source"/"repos", 1)]
     # School and business accounts sync as "OneDrive - <organisation>" and a
     # clone can sit four folders below that root, past the bounded walk.
-    for cloud in sorted(home.glob("OneDrive*")):
-        if cloud.is_dir():
-            roots.append((cloud, 4))
+    try:
+        cloud_roots = sorted(home.glob("OneDrive*"))
+    except OSError:
+        cloud_roots = []
+    for cloud in cloud_roots:
+        try:
+            if cloud.is_dir():
+                roots.append((cloud, 4))
+        except OSError:
+            continue
     for root, depth in roots:
-        if not root.is_dir():
+        try:
+            if not root.is_dir():
+                continue
+        except OSError:
             continue
         patterns = ["cobotta_calibrate_pick.py"]
         for level in range(1, depth + 1):
@@ -311,9 +321,27 @@ def write_json(path, data, backup=False):
     text = json.dumps(data, indent=2, allow_nan=False)
     tmp = path.with_name(path.name + "." + stamp() + ".tmp")
     tmp.write_text(text + "\n", encoding="utf-8")
-    if backup and path.exists():
-        shutil.copy2(path, path.with_name(path.stem + ".backup_" + stamp() + path.suffix))
-    os.replace(tmp, path)
+    try:
+        if backup and path.exists():
+            shutil.copy2(path, path.with_name(path.stem + ".backup_" + stamp() + path.suffix))
+        # OneDrive/antivirus scanners on Windows can briefly hold a handle on
+        # recently created files, causing os.replace() to fail with WinError 5/32.
+        delays = (0.02, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6)
+        for attempt in range(len(delays) + 1):
+            try:
+                os.replace(tmp, path)
+                return
+            except OSError as exc:
+                transient = isinstance(exc, PermissionError) or getattr(exc, "winerror", None) in (5, 32)
+                if not transient or attempt == len(delays):
+                    raise
+                time.sleep(delays[attempt])
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
 
 
 def fingerprint(data):
@@ -978,7 +1006,7 @@ class Camera:
         self.http = HTTPCamera(vision["camera_ip"], vision["camera_username"],
                                password, timeout=snapshot_timeout)
 
-    def frame(self, label, controller=None, *, before=None):
+    def frame(self, label, controller=None, *, before=None, write_record=True):
         if controller and before is None:
             with TIMINGS.phase("camera.frame.stable_before"):
                 before = controller.stable()
@@ -1017,7 +1045,8 @@ class Camera:
                 record["T_base_flange"] = after["T_base_flange"]
                 record["T_base_camera_mount"] = after["T_base_camera_mount"]
             show_image(frame, "FRESH HTTP SNAPSHOT " + record["completed_utc"] + " | " + label)
-            write_json(prefix.with_suffix(".json"), record)
+            if write_record:
+                write_json(prefix.with_suffix(".json"), record)
             return frame, record, prefix
         except BaseException as exc:
             record["error"] = str(exc)
@@ -1040,7 +1069,7 @@ class Camera:
         # Consecutive snapshots share their stationary boundary reading. Both
         # requests and the pose checks at the start, boundary and end remain.
         check_stop()
-        frame, rec, prefix = self.frame(label, controller, before=settled["state_after"])
+        frame, rec, prefix = self.frame(label, controller, before=settled["state_after"], write_record=False)
         rec["role"] = role
         detection_started = time.perf_counter()
         markers, ids, rejected = cv2.aruco.detectMarkers(frame, self.dictionary)
