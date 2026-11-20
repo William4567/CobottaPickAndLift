@@ -1,6 +1,6 @@
 # Third-party notices
 
-This project is MIT-licensed (see LICENSE) and includes or derives from the
+This project is MIT-licensed (see [LICENSE](../LICENSE)) and includes or derives from the
 following third-party material.
 
 ## DENSO b-CAP Python sample code

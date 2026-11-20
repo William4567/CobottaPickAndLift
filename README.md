@@ -1,73 +1,37 @@
 # cobottaPickAndLift
 
-Eye-in-hand calibration and pick-and-lift for a **DENSO COBOTTA** with a
-wrist-mounted Canon N10-W02 camera.
+Eye-in-hand calibration and pick-and-lift for a DENSO COBOTTA with a wrist-mounted Canon N10-W02 camera.
 
-RoboDK is used for simulated planning and collision checking only. The physical
-arm is driven over DENSO b-CAP after an explicit operator confirmation.
+RoboDK is used offline for kinematics checks and collision-checked path planning. Physical motion runs directly over DENSO b-CAP (TCP 5007) after explicit operator confirmations.
 
-> **Safety first.** This is production code for a real robot. Read
-> [docs/OPERATING.md](docs/OPERATING.md) before the first motion. Keep the
-> commanded speed/acceleration/deceleration at 100%, keep the physical stop
-> within reach and the swept area clear. The program never retries, recovers,
-> releases or resets faults automatically.
+## Overview
 
-## Requirements
+- **Calibration (`calibrate`)**: Measures a local robot-to-image response around the saved `VIEW` pose, frames the 7x5 ChArUco board, collects 16+ fit and 6+ held-out check views along bounded segments, fits camera intrinsics, J5 hand-eye transform, and table plane, and registers the workspace paper polygon.
+- **Preview & Pick (`preview`, `pick`)**: Detects a single blue 25 mm cube on the calibrated table, verifies its 3D top-face pose and paper clearance, plans approach, vertical descent, lift, and held return to `VIEW`, and (in `pick`) executes the grasp and lift.
+- **Diagnostics (`status`, `set-view`, `detect_blue.py`)**: Inspect controller state/overrides, save a new `VIEW` pose without arm motion, or tune HSV cube segmentation offline/live.
 
-- Windows and RoboDK with a station containing the COBOTTA.
-- RoboDK's embedded Python: `C:\RoboDK\Python-Embedded\python.exe`.
-- `numpy` 1.25.x and `opencv-contrib-python` **4.5.5** with `aruco`.
-- DENSO COBOTTA reachable over b-CAP (TCP 5007).
-- Canon N10-W02 camera reachable over HTTP Digest (1920 x 1080).
+## Documentation
 
-No administrator rights are needed: the program and its dependencies can live
-entirely under your user profile.
+- [Installation guide](docs/installation_guide.md) — dependencies, `config.json` setup, RoboDK setup, and troubleshooting
+- [Operating manual](docs/OPERATING.md) — workflow modes, safety interlocks, calibration steps, picking, and session outputs
+- [Calibration format and quality](docs/QUALITY_AND_FORMAT.md) — `cobotta.eye_in_hand.v2` schema, coordinate conventions, and acceptance gates
+- [Hardware geometry notes](docs/HARDWARE_GEOMETRY_NOTES.md) — J5 camera mount, gripper/camera collision envelopes, and CAD references
+- [Third-party notices](docs/THIRD_PARTY_NOTICES.md) — bundled b-CAP client, CAD envelopes, and ChArUco assets
 
-## Quick start
+## Repository layout
 
-1. Clone the repository, e.g. to
-   `C:\Users\<you>\Documents\cobottaPickAndLift`.
-2. Install the Python packages **inside the repository** (no admin):
-   ```powershell
-   "C:\RoboDK\Python-Embedded\python.exe" -m pip install --target "C:\Users\<you>\Documents\cobottaPickAndLift\vendor" "numpy==1.25.2" "opencv-contrib-python==4.5.5.64"
-   ```
-   Skip this if RoboDK's Python already has OpenCV 4.5.5 and numpy 1.25.
-3. In RoboDK: **File > Open** `cobotta_calibrate_pick.py` so it becomes a
-   Python item, with `C:\RoboDK\Python-Embedded\python.exe` as interpreter.
-4. Edit **`config.json` in the clone** — it ships with placeholders. Set
-   `robot_ip`, `camera_ip`, `camera_username` and `camera_password`, then run.
-   `config.json` is tracked so every clone has it; after you fill it in, do not
-   commit it (restore the placeholders with `git checkout -- config.json`).
-5. Choose a mode from the dropdown: `status`, `set-view`, `calibrate`,
-   `preview`, `pick` (plus `board` and `instructions`).
-
-Full instructions, field descriptions and troubleshooting:
-**[guide.md](guide.md)**.
-
-## Files
-
-| File | Purpose |
+| Path | Purpose |
 | --- | --- |
-| `cobotta_calibrate_pick.py` | Main entry point (RoboDK Python item) |
-| `bcapclient.py`, `variant.py`, `orinexception.py` | DENSO b-CAP transport |
-| `http_camera.py`, `detect_blue.py` | Camera snapshot and blue-cube detection |
-| `automatic_setup.json` | Verified robot/gripper/board/quality/collision setup |
-| `config.json` | Robot and camera settings; edit it, then reset before committing |
-| `guide.md` | Setup, configuration and troubleshooting |
-| `collision_assets/` | Hash-locked camera and gripper envelopes |
-| `charuco-7x5.pdf`, `charuco-7x5-letter.pdf` | Calibration targets |
-| `calibrations/` | Accepted calibrations written by the program |
-| `sessions/` | Per-run evidence written by the program (not in the repository) |
-| `docs/` | Operating, quality, environment and hardware notes |
-
-## Outputs
-
-Each run creates `sessions/<timestamp>_<mode>/` with images, observations,
-routes, `timings.json`, `speed_report.json` and, on a stop, `failure.json`.
-Accepted calibrations are written to `calibrations/` and bound in the config
-file.
+| `cobotta_calibrate_pick.py` | Main RoboDK Python entry point (`status`, `set-view`, `calibrate`, `preview`, `pick`, `board`, `instructions`) |
+| `bcapclient.py`, `variant.py`, `orinexception.py` | DENSO b-CAP TCP transport |
+| `http_camera.py`, `detect_blue.py` | Canon WebView HTTP snapshot client and standalone blue-cube detector |
+| `automatic_setup.json` | Hardware dimensions, gripper/planning limits, quality gates, and asset hashes |
+| `config.json` | Tracked template with placeholders; fill in locally before running |
+| `collision_assets/` | Hash-checked STL envelopes for the J5 camera assembly and J6 gripper body |
+| `charuco-7x5.pdf`, `charuco-7x5-letter.pdf` | Reference ChArUco board and US Letter printable sheet |
+| `calibrations/` | Accepted `*_calibration_v2.json` files (ignored by git) |
+| `sessions/` | Per-run logs, images, routes, and diagnostics (ignored by git) |
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Third-party components and sources are listed in
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+MIT — see [LICENSE](LICENSE) and [docs/THIRD_PARTY_NOTICES.md](docs/THIRD_PARTY_NOTICES.md).

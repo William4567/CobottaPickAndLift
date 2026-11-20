@@ -147,14 +147,14 @@ def _find_project_directory():
 def _config_help(fields):
     return ("Edit the configuration file and run again:\n  " + str(CONFIG_FILE) +
             "\nFields to set: " + ", ".join(fields) +
-            "\nSee guide.md for what each field means.")
+            "\nSee docs/installation_guide.md for what each field means.")
 
 
 def _load_config():
     if not CONFIG_FILE.is_file():
         _stop("config.json is missing from the project folder:\n  " + str(CONFIG_FILE) +
               "\nRestore the placeholder copy from the repository with:\n  "
-              "git checkout -- config.json\nThen edit it (see guide.md).")
+              "git checkout -- config.json\nThen edit it (see docs/installation_guide.md).")
     try:
         config = json.loads(CONFIG_FILE.read_text(encoding="utf-8-sig"))
     except ValueError as exc:
@@ -1002,7 +1002,7 @@ class Camera:
         self.board, self.dictionary = get_board()
         password = str(vision.get("camera_password", ""))
         require(password and password != "CAMERA_PASSWORD",
-                "Set camera_password in " + str(CONFIG_FILE) + " (see guide.md).")
+                "Set camera_password in " + str(CONFIG_FILE) + " (see docs/installation_guide.md).")
         self.http = HTTPCamera(vision["camera_ip"], vision["camera_username"],
                                password, timeout=snapshot_timeout)
 
@@ -3361,7 +3361,7 @@ def run_calibration(rdk, cfg, vision, setup, folder):
             log(json.dumps(result["quality"], indent=2))
             require(result["quality"]["passed"],
                     "Calibration did not meet table/quality/coverage limits. Candidate and all images saved; "
-                    "previous accepted calibration remains unchanged. See QUALITY_AND_FORMAT.md.")
+                    "previous accepted calibration remains unchanged. See docs/QUALITY_AND_FORMAT.md.")
             result["workspace"] = register_printed_paper(camera, controller, result, folder)
             planner.workspace = result["workspace"]
             planner.cache.clear()

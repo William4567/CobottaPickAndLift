@@ -20,7 +20,7 @@ Base means zero-offset Work 0.
 | `quality` | Fit errors, held-out errors, coverage, excitation and pass/fail |
 | `binding` | Robot, saved VIEW, frame definitions and vision/geometry fingerprints |
 | `binding.controller_reference` | Verified conversion from the physical flange to the controller reference |
-| `workspace` | Paper corners from calibrated pattern plus confirmed print registration, or four visible image-click corners mapped into the table plane |
+| `workspace` | Paper polygon from calibrated board pose plus confirmed US Letter print layout (`register_printed_paper`) |
 
 The motion observations supply both `T_base_flange` and `T_base_camera_mount`.
 The latter is calculated from controller joints through J5 using DENSO's published
@@ -61,10 +61,8 @@ The reachable pool's predicted coverage is checked before collection; final
 acceptance still uses the captured corners and heldout validation, not forecasts.
 
 The `printed-page` workspace method uses the hash-locked supplied Letter layout
-and the fitted board pose only after the operator confirms the actual untrimmed,
-unshifted Actual Size print. Off-image edges are registered under that confirmed
-assumption; they are not independently measured. `image-corners` retains the four
-visible-corner method. The saved data records which method was used.
+and the fitted board pose assuming an untrimmed, unshifted Actual Size print.
+Off-image edges are registered from that layout rather than independently measured.
 
 Metric errors are consistency errors against the printed target and robot pose
 readings. They do not measure absolute grasp accuracy or correct inaccurate printing,
@@ -87,12 +85,14 @@ and encloses subdivided local triangle groups with 2 mm allowance and an 18.5 mm
 sweep to cover both documented factory mounting positions. Triangles are split
 to <=4 mm axis spans before 4 mm grouping, within isolated original 8 mm groups,
 to avoid the old long-triangle boxes filling empty mounting-end space. All
-retained CAD is still enclosed; see `HARDWARE_GEOMETRY_NOTES.md`. It follows J5; camera/link-4,
-camera/link-6, camera/gripper and camera/payload checks remain enabled. Only the
-camera's intended attachment to link 5 is excluded. The asset hash is checked
-before calibration or picking. They do not cover unmodelled objects,
-people or cables outside the supplied enclosure. They are not continuous certified
-collision avoidance. Start states rejected by the controller are not bypassed.
+retained CAD is still enclosed; see [HARDWARE_GEOMETRY_NOTES.md](HARDWARE_GEOMETRY_NOTES.md). It follows J5;
+camera/link-4, camera/link-6, camera/finger-sweep, and camera/payload checks
+remain enabled, while the camera's J5 mounting attachment and the rigid
+camera/gripper-body pair are excluded (see [HARDWARE_GEOMETRY_NOTES.md](HARDWARE_GEOMETRY_NOTES.md)).
+The asset hash is checked before calibration or picking. Envelopes do not cover
+unmodelled objects, people, or loose cables outside the CAD enclosure, and sampled
+checking is not continuous certified collision avoidance. Start states rejected by
+the controller are not bypassed.
 
 The gripper body uses a convex enclosure of the official stock CAD, expanded by
 the full 2 mm allowance. This replaces false occupied corners of its old AABB;
