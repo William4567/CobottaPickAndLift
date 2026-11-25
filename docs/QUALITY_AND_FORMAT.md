@@ -32,7 +32,10 @@ board image and ray/plane intersections without refitting the accepted transform
 
 Default gates: at least 16 fit and 6 check views; fit RMS <= 0.8 pixels;
 maximum per-check RMS <= 3 pixels; maximum check-corner plane error <= 1.5 mm;
-maximum board-angle discrepancy <= 0.7 degrees. Image coverage must span at least
+maximum board-angle discrepancy <= 0.7 degrees; board/table normal within 10 degrees
+of base +Z (`n[2] > cos(10 deg)`); and measured table height within
+`table_initial_z_mm ± table_initial_uncertainty_mm` (`-40` to `-5 mm` by default).
+Image coverage must span at least
 85% horizontally and 80% vertically, with a convex-hull area of at least 60% of the
 image. Rotation and translation excitation checks reject insufficiently varied views,
 and at least one fit view must tilt the board 15 degrees or more out of plane
@@ -48,9 +51,11 @@ image-directed framing can acquire the initial pose after explicit confirmation,
 through the same planner. Recorded robot/image response only proposes poses; it
 is never used as an accepted intrinsic/hand-eye/table calibration. Fresh response
 checks and predicted complete-marker visibility precede collected views. The
-operator-confirmed measured rectangle replaces the temporary disk after paper
-direction confirmation. This does not widen controller limits or relax any final
-image/quality gate. Acquisition images are excluded from fit/check data.
+fixed measured paper rectangle (`reported_paper_limits_mm`, inset 5 mm) replaces
+the temporary 35 mm disk automatically once the measured robot/image response
+agrees with the fixed paper direction within 5 degrees (`paper_direction_confirmation.png`).
+This does not widen controller limits or relax any final image/quality gate.
+Acquisition images are excluded from fit/check data.
 
 Current partial-board observations use OpenCV 4.5.5 `minMarkers=1`, which retains
 image-based subpixel refinement while permitting a corner supported by one visible

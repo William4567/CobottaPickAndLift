@@ -18,6 +18,7 @@ import os
 from pathlib import Path
 import shutil
 import signal
+import socket
 import sys
 import time
 import traceback
@@ -51,10 +52,7 @@ CONFIG_TEMPLATE = {
                "min_rectangular_fill": 0.7},
 }
 PROJECT_FILES = ("bcapclient.py", "variant.py", "orinexception.py", "http_camera.py",
-                 "detect_blue.py", "cobotta_calibrate_pick.py", "automatic_setup.json",
-                 "config.json", "charuco-7x5.pdf", "charuco-7x5-letter.pdf",
-                 "collision_assets/factory_camera_J5_envelope.stl",
-                 "collision_assets/stock_gripper_body_F_envelope.stl")
+                 "detect_blue.py", "cobotta_calibrate_pick.py", "automatic_setup.json")
 
 
 def _stop(message):
@@ -67,11 +65,25 @@ def _stop(message):
     raise RuntimeError(message)
 
 
+def _is_project_folder(folder):
+    return all((folder/name).is_file() for name in PROJECT_FILES)
+
+
 def _find_project_directory():
-    candidates = []
     if PROJECT_DIRECTORY.strip():
-        candidates.append(Path(PROJECT_DIRECTORY).expanduser())
-    candidates += [Path(__file__).resolve().parent, Path.cwd()]
+        override = Path(PROJECT_DIRECTORY).expanduser()
+        try:
+            override = override.resolve()
+        except OSError:
+            pass
+        if _is_project_folder(override):
+            return override
+        _stop("PROJECT_DIRECTORY does not point to a valid COBOTTA project folder:\n  " +
+              str(override) + "\nUpdate PROJECT_DIRECTORY near the top of cobotta_calibrate_pick.py.")
+    script_dir = Path(__file__).resolve().parent
+    if _is_project_folder(script_dir):
+        return script_dir
+    candidates = [script_dir, Path.cwd()]
     home = Path.home()
     roots = [(home, 1), (home/"Documents", 2), (home/"Desktop", 2),
              (home/"Downloads", 2), (home/"source", 2), (home/"repos", 2),
@@ -128,7 +140,7 @@ def _find_project_directory():
         if folder in seen:
             continue
         seen.add(folder)
-        if all((folder/name).is_file() for name in PROJECT_FILES):
+        if _is_project_folder(folder):
             found.append(folder)
     if len(found) == 1:
         return found[0]
@@ -313,8 +325,42 @@ def stamp():
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
 
 
+_FS_RETRY_DELAYS = (0.02, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6)
+
+
+def _retry_fs(action):
+    # OneDrive/antivirus scanners on Windows can briefly hold a handle on
+    # recently created files, causing file operations to fail with WinError 5/32.
+    for attempt in range(len(_FS_RETRY_DELAYS) + 1):
+        try:
+            return action()
+        except OSError as exc:
+            transient = isinstance(exc, PermissionError) or getattr(exc, "winerror", None) in (5, 32)
+            if not transient or attempt == len(_FS_RETRY_DELAYS):
+                raise
+            time.sleep(_FS_RETRY_DELAYS[attempt])
+
+
 def read_json(path):
-    return json.loads(Path(path).read_text(encoding="utf-8-sig"))
+    return json.loads(_retry_fs(lambda: Path(path).read_text(encoding="utf-8-sig")))
+
+
+def write_bytes_retry(path, data):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _retry_fs(lambda: path.write_bytes(data))
+
+
+def read_image(path):
+    data = _retry_fs(lambda: Path(path).read_bytes())
+    return cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+
+
+def write_image(path, image):
+    path = Path(path)
+    ok, encoded = cv2.imencode(path.suffix or ".png", image)
+    require(ok, "Could not encode image " + path.name)
+    write_bytes_retry(path, encoded.tobytes())
 
 
 def write_json(path, data, backup=False):
@@ -322,26 +368,12 @@ def write_json(path, data, backup=False):
     path.parent.mkdir(parents=True, exist_ok=True)
     text = json.dumps(data, indent=2, allow_nan=False)
     tmp = path.with_name(path.name + "." + stamp() + ".tmp")
-    # OneDrive/antivirus scanners on Windows can briefly hold a handle on
-    # recently created files, causing file operations to fail with WinError 5/32.
-    delays = (0.02, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6)
-
-    def _retry(action):
-        for attempt in range(len(delays) + 1):
-            try:
-                return action()
-            except OSError as exc:
-                transient = isinstance(exc, PermissionError) or getattr(exc, "winerror", None) in (5, 32)
-                if not transient or attempt == len(delays):
-                    raise
-                time.sleep(delays[attempt])
-
     try:
-        tmp.write_text(text + "\n", encoding="utf-8")
+        _retry_fs(lambda: tmp.write_text(text + "\n", encoding="utf-8"))
         if backup and path.exists():
             backup_path = path.with_name(path.stem + ".backup_" + stamp() + path.suffix)
-            _retry(lambda: shutil.copy2(path, backup_path))
-        _retry(lambda: os.replace(tmp, path))
+            _retry_fs(lambda: shutil.copy2(path, backup_path))
+        _retry_fs(lambda: os.replace(tmp, path))
     finally:
         try:
             if tmp.exists():
@@ -546,18 +578,35 @@ def get_board():
     return board, dictionary
 
 
+def validate_gripper_setup(setup):
+    hand = setup["gripper"]
+    open_mm = float(hand["open_position_mm"])
+    open_speed = float(hand["open_speed_percent"])
+    force_n = float(hand["force_n"])
+    grip_tol = float(hand["grip_width_tolerance_mm"])
+    require(math.isfinite(open_mm) and setup["cube_width_mm"] + 3 <= open_mm <= 30,
+            "Stock gripper opening must leave at least 3 mm above cube width and be <=30 mm")
+    require(math.isfinite(open_speed) and 0 < open_speed <= 100,
+            "Stock gripper open_speed_percent must be in (0, 100]")
+    require(math.isfinite(force_n) and 6 <= force_n <= 20, "Stock gripper force must be 6-20 N")
+    require(math.isfinite(grip_tol) and grip_tol > 0, "Stock gripper grip_width_tolerance_mm must be positive")
+
+
 def validate_setup(setup, for_calibration):
     require(setup.get("stock_fingers_confirmed") is True,
             "Fixed setup requires the original unmodified DENSO fingers; verify automatic_setup.json")
     require(setup.get("factory_camera_mount_confirmed") is True,
             "This geometry requires the original Canon N10-W02 camera, factory bracket "
             "and original cable routing. A relocated assembly needs new geometry.")
-    require(setup.get("camera_mount_frame") == "DENSO_ROS_J5" and
+    camera_asset = ROOT/CAMERA_ENVELOPE
+    gripper_asset = ROOT/GRIPPER_BODY_ENVELOPE
+    require(camera_asset.is_file() and setup.get("camera_mount_frame") == "DENSO_ROS_J5" and
             setup.get("camera_envelope_sha256") == CAMERA_ENVELOPE_SHA256 and
-            hashlib.sha256((ROOT/CAMERA_ENVELOPE).read_bytes()).hexdigest() == CAMERA_ENVELOPE_SHA256,
-            "Factory camera collision asset/frame does not match this program")
-    require(hashlib.sha256((ROOT/GRIPPER_BODY_ENVELOPE).read_bytes()).hexdigest() == GRIPPER_BODY_SHA256,
-            "Stock gripper collision asset does not match this program")
+            hashlib.sha256(camera_asset.read_bytes()).hexdigest() == CAMERA_ENVELOPE_SHA256,
+            "Factory camera collision asset/frame does not match this program; restore collision_assets/")
+    require(gripper_asset.is_file() and
+            hashlib.sha256(gripper_asset.read_bytes()).hexdigest() == GRIPPER_BODY_SHA256,
+            "Stock gripper collision asset does not match this program; restore collision_assets/")
     require(float(setup["planning"]["margin_mm"]) == 2.0,
             "The supplied factory camera/gripper meshes include a fixed 2 mm allowance. "
             "A different margin requires regenerated verified assets; no margin was changed.")
@@ -568,7 +617,8 @@ def validate_setup(setup, for_calibration):
         require(setup.get("board_definition_fingerprint") == fingerprint(BOARD),
                 "automatic_setup.json board definition does not match this program's "
                 "CalibrX 7x5 definition; restore the supplied file")
-        require(board_pdf_matches(ROOT/PRINTABLE_BOARD),
+        board_path = ROOT/PRINTABLE_BOARD
+        require(board_path.is_file() and board_pdf_matches(board_path),
                 "The supplied charuco-7x5-letter.pdf is missing or changed (expected "
                 "sha256 " + PRINTABLE_BOARD_SHA256 + "); restore it with:\n  "
                 "git checkout HEAD -- charuco-7x5.pdf charuco-7x5-letter.pdf")
@@ -577,7 +627,7 @@ def validate_setup(setup, for_calibration):
                 setup.get("optics_locked_confirmed") is True,
                 "Fixed setup requires measured board thickness and locked optics in automatic_setup.json")
     require(setup["base_on_same_table"], "A measured mounting/table transform is required")
-    require(6 <= setup["gripper"]["force_n"] <= 20, "Stock gripper force must be 6-20 N")
+    validate_gripper_setup(setup)
     require(0 < setup["tip_clearance_mm"] < setup["cube_height_mm"]/2,
             "Tip clearance must leave contact below the cube centre")
 
@@ -832,9 +882,15 @@ class Controller:
                 end = time.monotonic()+10.0
                 while time.monotonic() < end:
                     check_stop()
-                    state = self.stable(empty=empty)
+                    self.check_frames()
+                    state = self.state()
+                    require(not state["error"],
+                            "Controller error: " + str(state["error_description"]))
+                    if empty:
+                        require(not state["hand_holding"],
+                                "Remove the held object using normal controls first")
                     record("verifying_motor_on", state)
-                    if state["servo"]:
+                    if state["servo"] and not state["busy"] and not state["hand_busy"]:
                         break
                     pause(0.10)
                 else:
@@ -846,7 +902,10 @@ class Controller:
             log("Motor power verified ON (@SERVO_ON); motion confirmation is still required.")
             return state
         except BaseException as exc:
-            record("stopped", error=exc)
+            try:
+                record("stopped", error=exc)
+            except Exception as record_error:
+                log("motor_readiness.json could not be updated on stop (ignored): " + str(record_error))
             raise
 
     def check_external_overrides(self):
@@ -964,32 +1023,89 @@ class Controller:
         finally:
             TIMINGS.add("controller.move_joint.polling", time.perf_counter()-polling_started)
 
+    def release_arm(self):
+        if self.owned:
+            self.call("GiveArm")
+            self.owned = False
+
     def wait_hand(self, predicate):
-        end = time.monotonic()+10
+        begin = time.monotonic()
+        end = begin + 10
+        saw_busy = False
         while time.monotonic() < end:
             self.check_motion_state()
-            if not self.hand("HandBusyState") and predicate():
+            busy = bool(self.hand("HandBusyState"))
+            saw_busy = saw_busy or busy
+            if not busy and (saw_busy or time.monotonic() - begin >= 0.15) and predicate():
                 return
             pause(0.05)
         raise TimeoutError("Gripper timed out; check object, position and hold status")
 
+    def _emergency_halt_new_connection(self):
+        client = ctrl = arm = None
+        started = False
+        try:
+            client = BCAPClient(self.cfg["robot_ip"], self.setup["robot_port"], 1.5)
+            client.service_start("")
+            started = True
+            ctrl = client.controller_connect("", "CaoProv.DENSO.VRC", "localhost", "")
+            arm = client.controller_getrobot(ctrl, "Arm", "")
+            client.robot_halt(arm, "")
+            try:
+                client.controller_execute(ctrl, "HandStop", None)
+            except Exception as exc:
+                log("Emergency HandStop not confirmed: " + str(exc))
+            return True
+        except Exception as exc:
+            log("Emergency reconnect HALT NOT CONFIRMED; use physical stop. " + str(exc))
+            return False
+        finally:
+            for action in (
+                (lambda: client.robot_release(arm)) if arm is not None else None,
+                (lambda: client.controller_disconnect(ctrl)) if ctrl is not None else None,
+                (client.service_stop if started else None),
+                (client.close if client is not None else None),
+            ):
+                if action is not None:
+                    try:
+                        action()
+                    except Exception:
+                        pass
+
     def halt(self):
         if self.arm is not None:
+            if getattr(self.client, "_dead", False):
+                log("Primary b-CAP connection lost during motion; attempting fresh emergency HALT.")
+                self._emergency_halt_new_connection()
+                return
+            halted = False
             try:
                 self.client.robot_halt(self.arm, "")
+                halted = True
             except Exception as exc:
                 log("HALT NOT CONFIRMED; use physical stop. " + str(exc))
             try:
                 self.hand("HandStop")
             except Exception as exc:
                 log("HandStop not confirmed: " + str(exc))
+            if not halted and getattr(self.client, "_dead", False):
+                self._emergency_halt_new_connection()
 
     def __exit__(self, typ, value, tb):
         if typ is not None and self.owned:
             self.halt()
+            if self.arm is not None and not getattr(self.client, "_dead", False):
+                wait_end = time.monotonic() + 1.5
+                while time.monotonic() < wait_end:
+                    try:
+                        if not bool(self.var("@BUSY_STATUS")):
+                            break
+                    except Exception:
+                        break
+                    time.sleep(0.05)
         actions = []
         if self.owned:
-            actions.append(lambda: self.call("GiveArm"))
+            actions.append(self.release_arm)
         for handle in self.variable_handles.values():
             actions.append(lambda handle=handle: self.client.variable_release(handle))
         self.variable_handles.clear()
@@ -1032,17 +1148,17 @@ class Camera:
             with TIMINGS.phase("camera.frame.http_capture"):
                 try:
                     data = self.http.capture()
-                except (TimeoutError, urllib.error.URLError) as exc:
-                    if isinstance(exc, TimeoutError) or (
+                except (TimeoutError, socket.timeout, urllib.error.URLError) as exc:
+                    if isinstance(exc, (TimeoutError, socket.timeout)) or (
                         isinstance(exc, urllib.error.URLError) and (
-                            isinstance(exc.reason, TimeoutError) or
+                            isinstance(exc.reason, (TimeoutError, socket.timeout)) or
                             "timed out" in str(exc.reason).lower()
                         )
                     ):
                         raise TimeoutError(f"Camera snapshot {label} timed out "
                                            f"({self.http.timeout:g} s socket timeout)") from exc
                     raise
-            prefix.with_suffix(".jpg").write_bytes(data)
+            write_bytes_retry(prefix.with_suffix(".jpg"), data)
             with TIMINGS.phase("camera.frame.decode"):
                 frame = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
                 require(frame is not None, "JPEG decoding failed")
@@ -1064,7 +1180,10 @@ class Camera:
             return frame, record, prefix
         except BaseException as exc:
             record["error"] = str(exc)
-            write_json(prefix.with_suffix(".json"), record)
+            try:
+                write_json(prefix.with_suffix(".json"), record)
+            except Exception as write_exc:
+                log("Failed capture metadata could not be written (ignored): " + str(write_exc))
             canvas = frame if frame is not None else np.zeros((1080, 1920, 3), np.uint8)
             # A failed request displays a new error panel, never yesterday's image as live.
             try:
@@ -1139,12 +1258,15 @@ class Camera:
             src = np.concatenate([obj_by_id[int(i)] for i in ids.reshape(-1)]).astype(np.float32)
             dst = np.concatenate(markers).reshape(-1, 2).astype(np.float32)
             h, _ = cv2.findHomography(src, dst, cv2.RANSAC, 3.0)
-            if h is not None:
+            if h is not None and np.isfinite(h).all() and abs(np.linalg.det(h)) > 1e-9:
                 w, height = BOARD["width_mm"], BOARD["height_mm"]
                 outline = np.array([[0, 0], [w, 0], [w, height], [0, height],
                                     [w/2, height/2]], np.float32)
+                homog = np.column_stack([outline, np.ones(len(outline), dtype=np.float64)]) @ h.T
                 projected = cv2.perspectiveTransform(outline.reshape(-1, 1, 2), h).reshape(-1, 2)
-                if np.isfinite(projected).all() and np.max(np.abs(projected)) < 100000:
+                poly_int = np.rint(projected[:4]).astype(np.int32)
+                if (np.all(homog[:, 2] > 1e-6) and np.isfinite(projected).all() and
+                        np.max(np.abs(projected)) < 100000 and cv2.isContourConvex(poly_int)):
                     rec["framing_guide"] = {"pattern_outline_px": projected[:4].tolist(),
                                             "pattern_centre_px": projected[4].tolist(),
                                             "image_centre_px": centre.tolist()}
@@ -1155,31 +1277,31 @@ class Camera:
                     blue = cv2.inRange(hsv, np.asarray(self.vision["hsv_lower"], np.uint8),
                                        np.asarray(self.vision["hsv_upper"], np.uint8))
                     pattern_mask = np.zeros(frame.shape[:2], np.uint8)
-                    cv2.fillConvexPoly(pattern_mask, np.rint(projected[:4]).astype(np.int32), 255)
+                    cv2.fillConvexPoly(pattern_mask, poly_int, 255)
                     blue = cv2.bitwise_and(blue, pattern_mask)
                     blobs, _ = cv2.findContours(blue, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                     blue_area = max((cv2.contourArea(c) for c in blobs), default=0.0)
                     rec["blue_region_on_pattern_px2"] = float(blue_area)
-                    cv2.polylines(annotated, [np.rint(projected[:4]).astype(np.int32)],
-                                  True, (0, 255, 255), 2)
+                    cv2.polylines(annotated, [poly_int], True, (0, 255, 255), 2)
                     start = np.clip(np.rint(projected[4]), [0, 66],
                                     [frame.shape[1]-1, frame.shape[0]-1]).astype(int)
                     if np.linalg.norm(projected[4]-centre) > 60:
                         cv2.arrowedLine(annotated, tuple(start), tuple(centre.astype(int)),
                                         (0, 255, 255), 3, tipLength=0.08)
-        valid = (count >= 12 and area >= 8000 and rows >= 2 and columns >= 2 and
-                 rec.get("blue_region_on_pattern_px2", 0) < 400)
+        geometry_ok = count >= 12 and area >= 8000 and rows >= 2 and columns >= 2
+        unobstructed = rec.get("blue_region_on_pattern_px2", 0) < 400
+        valid = geometry_ok and unobstructed
         rec["accepted"] = bool(valid)
         rec["reason"] = "%d markers; %d/12 ChArUco corners, %d rows x %d columns, hull %.0f px^2" % (
             marker_count, count, rows, columns, area)
-        if not valid:
+        if not geometry_ok:
             rec["reason"] += "; need >=12 corners in >=2 rows/columns over >=8000 px^2"
-        if rec.get("blue_region_on_pattern_px2", 0) >= 400:
+        if not unobstructed:
             rec["reason"] += "; blue region obstructs the pattern: remove the object before motion"
         TIMINGS.add("camera.observation.detection", time.perf_counter()-detection_started)
         shown = show_image(annotated, "FRESH SNAPSHOT | " + label + " | " + rec["reason"])
         writes_started = time.perf_counter()
-        cv2.imwrite(str(prefix.with_name(prefix.name+"_corners.png")), shown)
+        write_image(prefix.with_name(prefix.name+"_corners.png"), shown)
         write_json(prefix.with_suffix(".json"), rec)
         TIMINGS.add("camera.observation.writes", time.perf_counter()-writes_started)
         return rec
@@ -1327,7 +1449,8 @@ class Planner:
     def enable_pair(self, a, b, ia=0, ib=0, on=True):
         require(self.rdk.setCollisionActivePair(robolink.COLLISION_ON if on else robolink.COLLISION_OFF,
                                               a, b, ia, ib), "Could not configure collision pair")
-        self.pair_state[(self._role(a), int(ia), self._role(b), int(ib))] = bool(on)
+        pair_key = tuple(sorted(((self._role(a), int(ia)), (self._role(b), int(ib)))))
+        self.pair_state[pair_key] = bool(on)
 
     def purge_stale_generated_items(self):
         # A killed RoboDK session can leave AUTO_* collision items behind. They
@@ -1404,90 +1527,130 @@ class Planner:
             for link in range(1, 7):
                 self.enable_pair(self.robot, obstacle, link)
             self.enable_pair(self.robot, obstacle, 0, on=False)
-        for item, _ in self.moving:
+        for i, (item, _) in enumerate(self.moving):
             for link in range(7):
                 mounting_contact = link == 5 if item == camera else link in (5, 6)
                 self.enable_pair(self.robot, item, link, on=not mounting_contact)
             for obstacle in obstacles:
                 self.enable_pair(item, obstacle)
-            for other, _ in self.moving:
-                if item != other:
-                    # The stock gripper body and the factory camera envelope are
-                    # rigid wrist parts whose relative pose depends only on J6.
-                    # The envelope deliberately covers two factory profiles plus
-                    # the CAD cable loop with a 2 mm margin. The operator verified
-                    # the real wrist rotates freely in both directions with a cube
-                    # held and asked for that one pair to be removed, so it is
-                    # disabled. Every other camera pair (finger sweep, links,
-                    # table, payload, target cube, station objects) stays enabled.
-                    body_camera = ({self._role(item), self._role(other)} ==
-                                   {"gripper_body", "factory_camera"})
-                    self.enable_pair(item, other,
-                                     on=(item == camera or other == camera) and not body_camera)
+            for other, _ in self.moving[i+1:]:
+                # The stock gripper body and the factory camera envelope are
+                # rigid wrist parts whose relative pose depends only on J6.
+                # The envelope deliberately covers two factory profiles plus
+                # the CAD cable loop with a 2 mm margin. The operator verified
+                # the real wrist rotates freely in both directions with a cube
+                # held and asked for that one pair to be removed, so it is
+                # disabled. Every other camera pair (finger sweep, links,
+                # table, payload, target cube, station objects) stays enabled.
+                body_camera = ({self._role(item), self._role(other)} ==
+                               {"gripper_body", "factory_camera"})
+                self.enable_pair(item, other,
+                                 on=(item == camera or other == camera) and not body_camera)
         for i in range(7):
             for j in range(i+2, 7):
                 self.enable_pair(self.robot, self.robot, i, j)
-        # Include existing station objects in the moving enclosure checks.
+        # Include existing station objects in both arm link (1..6) and moving enclosure checks.
         for other in self.rdk.ItemList(robolink.ITEM_TYPE_OBJECT):
             if other not in self.items:
+                for link in range(1, 7):
+                    self.enable_pair(self.robot, other, link)
+                self.enable_pair(self.robot, other, 0, on=False)
                 for item, _ in self.moving:
                     self.enable_pair(item, other)
         log("Collision model: station arm/objects + table + stock CAD gripper body/finger sweep + "
             "refined factory camera/bracket/CAD cable envelope on J5 "
             "(subdivided CAD, 2 mm margin, both factory profiles). "
-            "Camera checked against link 4, link 6 and gripper; only its J5 mounting contact excluded. "
+            "Camera checked against links 0-4, link 6, finger sweep, table, payload, target cube and station objects; "
+            "J5 mounting contact and rigid gripper-body/camera pair excluded. "
             "Loose cable deviations, added fixtures and people are not modelled; sampling is not a safety certification.")
 
     def set_payload(self, bounds=None):
-        if self.held_box is not None:
-            item, _ = self.held_box
-            self.moving.remove(self.held_box)
-            self.items.remove(item)
-            self._forget(item)
-            item.Delete()
-            self.held_box = None
-        if bounds is not None:
-            bounds = np.asarray(bounds) + np.array([[-self.margin]*3, [self.margin]*3])
-            item = self.make_box("held_cube", bounds, self.base_world)
-            self.held_box = (item, bounds)
-            for link in range(0, 5):
-                self.enable_pair(self.robot, item, link)
-            for link in (5, 6):
-                self.enable_pair(self.robot, item, link, on=False)
-            for other, _ in self.moving:
-                self.enable_pair(item, other, on=other == self.camera_item)
-            for other in self.rdk.ItemList(robolink.ITEM_TYPE_OBJECT):
-                if other not in self.items or other in self.obstacles:
-                    self.enable_pair(item, other)
-            self.moving.append(self.held_box)
+        try:
+            if self.held_box is not None:
+                item, _ = self.held_box
+                if self.held_box in self.moving:
+                    self.moving.remove(self.held_box)
+                if item in self.items:
+                    self.items.remove(item)
+                self._forget(item)
+                self.held_box = None
+                item.Delete()
+            if bounds is not None:
+                bounds = np.asarray(bounds) + np.array([[-self.margin]*3, [self.margin]*3])
+                item = self.make_box("held_cube", bounds, self.base_world)
+                try:
+                    for link in range(0, 5):
+                        self.enable_pair(self.robot, item, link)
+                    for link in (5, 6):
+                        self.enable_pair(self.robot, item, link, on=False)
+                    for other, _ in self.moving:
+                        self.enable_pair(item, other, on=other == self.camera_item)
+                    for other in self.rdk.ItemList(robolink.ITEM_TYPE_OBJECT):
+                        if other not in self.items or other in self.obstacles:
+                            self.enable_pair(item, other)
+                except BaseException:
+                    if item in self.items:
+                        self.items.remove(item)
+                    self._forget(item)
+                    try:
+                        item.Delete()
+                    except Exception:
+                        pass
+                    raise
+                self.held_box = (item, bounds)
+                self.moving.append(self.held_box)
+        finally:
+            self.cache.clear()
+
+    def set_target_finger_collision(self, on):
+        if self.target_cube is None:
+            return
+        for moving, _ in self.moving:
+            if self._role(moving) == "box:finger_swept_envelope":
+                self.enable_pair(moving, self.target_cube, on=on)
         self.cache.clear()
 
-    def set_target_cube(self, cube=None, cal=None):
-        if self.target_cube is not None:
-            self.items.remove(self.target_cube)
-            self._forget(self.target_cube)
-            self.target_cube.Delete()
-            self.target_cube = None
-            self.target_pose = None
-        if cube is not None:
-            n = np.asarray(cal["table"]["normal_base"])
-            y = np.asarray(cube["closing_axis_base"])
-            h = transform(np.column_stack([np.cross(y, n), y, n]), cube["centre_base_mm"])
-            w, z = self.setup["cube_width_mm"], self.setup["cube_height_mm"]
-            item = self.make_box("target_cube", [[-w/2, -w/2, -z/2], [w/2, w/2, z/2]], self.base_world @ h)
-            self.target_cube = item
-            self.target_pose = self.base_world @ h
-            for link in range(7):
-                self.enable_pair(self.robot, item, link)
-            for moving, _ in self.moving:
-                # The full opening-sweep finger box encloses the intended grasp gap.
-                # Only that intentional target/finger contact is excluded.
-                self.enable_pair(moving, item, on="finger_swept_envelope" not in moving.Name())
-            # Only the supporting table is exempt. Extra fixtures stay checked.
-            self.enable_pair(item, self.obstacles[0], on=False)  # target rests on table
-            for obstacle in self.obstacles[1:]:
-                self.enable_pair(item, obstacle)
-        self.cache.clear()
+    def set_target_cube(self, cube=None, cal=None, *, finger_collision=True):
+        try:
+            if self.target_cube is not None:
+                old = self.target_cube
+                if old in self.items:
+                    self.items.remove(old)
+                self._forget(old)
+                self.target_cube = None
+                self.target_pose = None
+                old.Delete()
+            if cube is not None:
+                n = np.asarray(cal["table"]["normal_base"])
+                y = np.asarray(cube["closing_axis_base"])
+                h = transform(np.column_stack([np.cross(y, n), y, n]), cube["centre_base_mm"])
+                w, z = self.setup["cube_width_mm"], self.setup["cube_height_mm"]
+                item = self.make_box("target_cube", [[-w/2, -w/2, -z/2], [w/2, w/2, z/2]], self.base_world @ h)
+                try:
+                    for link in range(7):
+                        self.enable_pair(self.robot, item, link)
+                    for moving, _ in self.moving:
+                        is_fingers = self._role(moving) == "box:finger_swept_envelope"
+                        # Keep finger-vs-target checking active during approach transit;
+                        # disable it only for the final straight vertical descent onto the cube.
+                        self.enable_pair(moving, item, on=(finger_collision or not is_fingers))
+                    # Only the supporting table is exempt. Extra fixtures stay checked.
+                    self.enable_pair(item, self.obstacles[0], on=False)  # target rests on table
+                    for obstacle in self.obstacles[1:]:
+                        self.enable_pair(item, obstacle)
+                except BaseException:
+                    if item in self.items:
+                        self.items.remove(item)
+                    self._forget(item)
+                    try:
+                        item.Delete()
+                    except Exception:
+                        pass
+                    raise
+                self.target_cube = item
+                self.target_pose = self.base_world @ h
+        finally:
+            self.cache.clear()
 
     def _role(self, item):
         # Roles are keyed by item name: RoboDK Item objects are not reliable
@@ -1508,7 +1671,7 @@ class Planner:
             role = None
         if role is not None:
             self.pair_state = {key: on for key, on in self.pair_state.items()
-                               if role not in (key[0], key[2])}
+                               if role not in (key[0][0], key[1][0])}
 
     def _path_key(self, path):
         return tuple(tuple(np.round(np.asarray(q, float).ravel(), 6).tolist()) for q in path)
@@ -1536,12 +1699,14 @@ class Planner:
             ("payload", None if self.held_box is None else
              (self._role(self.held_box[0]), nums(self.held_box[1]))),
             ("obstacles", tuple(sorted(self._role(item) for item in self.obstacles))),
-            ("pairs", tuple(sorted((a, ia, b, ib, on) for (a, ia, b, ib), on
+            ("pairs", tuple(sorted((a, ia, b, ib, on) for ((a, ia), (b, ib)), on
                                    in self.pair_state.items()))),
             ("workspace", None if self.workspace is None else hashlib.sha256(
                 json.dumps(self.workspace, sort_keys=True, default=str).encode()).hexdigest()),
             ("anchor", None if self.calibration_anchor_xy is None else
              nums(self.calibration_anchor_xy)),
+            ("grasp_tcp", None if self.grasp_tcp is None else nums(self.grasp_tcp)),
+            ("model_physical", nums(self.T_model_physical)),
             ("limits", nums(self.low), nums(self.high), float(self.margin), float(self.step)),
             ("base_world", nums(self.base_world)),
         ]
@@ -1827,12 +1992,55 @@ def project_points(h_camera_board, obj, k, d):
 
 
 def pnp(obj, pix, k, d):
-    ok, r, t = cv2.solvePnP(np.asarray(obj, float), np.asarray(pix, float), k, d,
-                           flags=cv2.SOLVEPNP_ITERATIVE)
+    obj = np.asarray(obj, float)
+    pix = np.asarray(pix, float)
+    if len(obj) >= 4 and np.allclose(obj[:, 2], 0.0, atol=1e-9):
+        n_sol, rvecs, tvecs, _ = cv2.solvePnPGeneric(
+            obj, pix, k, d, flags=cv2.SOLVEPNP_IPPE)
+        best = None
+        for r0, t0 in zip(rvecs[:n_sol], tvecs[:n_sol]):
+            ok, r, t = cv2.solvePnP(
+                obj, pix, k, d, r0.copy(), t0.copy(),
+                useExtrinsicGuess=True, flags=cv2.SOLVEPNP_ITERATIVE)
+            if not ok:
+                continue
+            h = transform(cv2.Rodrigues(r)[0], t)
+            if not np.all(points(h, obj)[:, 2] > 0):
+                continue
+            err = float(np.sum((project_points(h, obj, k, d) - pix) ** 2))
+            if best is None or err < best[0]:
+                best = (err, h)
+        if best is not None:
+            return best[1]
+    ok, r, t = cv2.solvePnP(obj, pix, k, d, flags=cv2.SOLVEPNP_ITERATIVE)
     require(ok, "Board pose solve failed")
     h = transform(cv2.Rodrigues(r)[0], t)
     require(np.all(points(h, obj)[:, 2] > 0), "Invalid planar pose branch")
     return h
+
+
+def _distortion_monotone(k, d):
+    corners = np.array([[0, 0], [1919, 0], [1919, 1079], [0, 1079]], float)
+    crit = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 40, 1e-10)
+    normalized = cv2.undistortPointsIter(
+        corners.reshape(-1, 1, 2), k, d, None, None, crit).reshape(-1, 2)
+    if not np.isfinite(normalized).all():
+        return False
+    # Verify undistorted corners project back to the sensor corners; a radial fold
+    # diverges or lands on the wrong branch.
+    reproj = cv2.projectPoints(
+        np.column_stack([normalized, np.ones(len(normalized))]),
+        np.zeros(3), np.zeros(3), k, d)[0].reshape(-1, 2)
+    if not np.isfinite(reproj).all() or np.max(np.linalg.norm(reproj - corners, axis=1)) > 1.0:
+        return False
+    r2_max = max(
+        float(np.max(np.sum(normalized * normalized, axis=1))),
+        float(np.max(((corners[:, 0] - k[0, 2]) / k[0, 0]) ** 2 +
+                     ((corners[:, 1] - k[1, 2]) / k[1, 1]) ** 2)),
+    )
+    r2 = np.linspace(0.0, r2_max * 1.2, 300)
+    k1, k2, _, _, k3 = d.reshape(-1)[:5]
+    return bool(np.all(1 + 3*k1*r2 + 5*k2*r2**2 + 7*k3*r2**3 > 0))
 
 
 def validate_calibration_intrinsics(k, d):
@@ -1840,12 +2048,7 @@ def validate_calibration_intrinsics(k, d):
     require(200 < k[0, 0] < 10000 and 200 < k[1, 1] < 10000 and
             0 < k[0, 2] < 1920 and 0 < k[1, 2] < 1080, "Implausible intrinsics")
     # Reject radial folds throughout the full sensor, not only near the board.
-    corners = np.array([[0, 0], [1919, 0], [1919, 1079], [0, 1079]], float)
-    normalized = cv2.undistortPoints(corners.reshape(-1, 1, 2), k, d).reshape(-1, 2)
-    require(np.isfinite(normalized).all(), "Nonfinite normalized sensor corners")
-    r2 = np.linspace(0, np.max(np.sum(normalized*normalized, axis=1))*1.2, 300)
-    k1, k2, _, _, k3 = d.reshape(-1)[:5]
-    require(np.all(1+3*k1*r2+5*k2*r2**2+7*k3*r2**3 > 0), "Distortion folds inside sensor")
+    require(_distortion_monotone(k, d), "Distortion folds inside sensor")
 
 
 def refine_fixed_board(bf, objects, images, fc, bb, k, d):
@@ -1870,6 +2073,8 @@ def refine_fixed_board(bf, objects, images, fc, bb, k, d):
         fc, bb, k, d = unpack(offset)
         if not (200 < k[0, 0] < 10000 and 200 < k[1, 1] < 10000 and
                 0 < k[0, 2] < 1920 and 0 < k[1, 2] < 1080):
+            return None
+        if not _distortion_monotone(k, d):
             return None
         errors = []
         for mount, obj, pix in fit_views:
@@ -1957,8 +2162,11 @@ def fit_calibration(records, setup, folder):
             "Hand-eye rotation excitation is insufficient: rotate about at least two nonparallel axes")
     span = np.ptp(np.array([h[:3, 3] for h in bf]), axis=0)
     require(np.linalg.norm(span) >= 25, "Camera positions have insufficient translation variation")
+    # Angle between camera optical axes expressed in the stationary board frame:
+    # row 2 of R_camera_board is the optical +Z axis in board coordinates. This
+    # matches viewing_tilt() and excludes pure in-plane camera roll.
     normal_tilts = [
-        math.degrees(math.acos(float(np.clip((cb[0][:3, :3].T @ h[:3, :3])[2, 2], -1.0, 1.0))))
+        math.degrees(math.acos(float(np.clip((cb[0][:3, :3] @ h[:3, :3].T)[2, 2], -1.0, 1.0))))
         for h in cb
     ]
     require(max(normal_tilts) >= 15,
@@ -2112,7 +2320,7 @@ def register_printed_paper(camera, controller, cal, folder):
             "Fixed paper projection is invalid")
     cv2.polylines(drawn, [np.rint(outline_pixels).astype(np.int32)], True, (0, 255, 255), 3)
     show_image(drawn, "PAPER BOUNDARY | fixed Letter print")
-    cv2.imwrite(str(prefix.with_name(prefix.name+"_outline.png")), drawn)
+    write_image(prefix.with_name(prefix.name+"_outline.png"), drawn)
     workspace = {"method": "calibrated board plus fixed printed-page registration",
                  "polygon_table_xy_mm": xy.tolist(), "axes_base": axes.tolist(),
                  "origin_base_mm": origin.tolist(), "corners_base_mm": hits.tolist(),
@@ -2133,11 +2341,12 @@ def contour_samples(poly, count=100):
     b = np.roll(a, -1, axis=0)
     lengths = np.linalg.norm(b-a, axis=1)
     require(np.all(lengths > 1e-8), "Degenerate object outline")
-    result = []
-    for p, v, length in zip(a, b-a, lengths):
-        n = max(2, round(count*length/lengths.sum()))
-        result.extend(p + v*f for f in np.linspace(0, 1, n, endpoint=False))
-    return np.asarray(result)
+    total = float(lengths.sum())
+    cumulative = np.concatenate([[0.0], np.cumsum(lengths)])
+    positions = np.linspace(0.0, total, count, endpoint=False)
+    edges = np.clip(np.searchsorted(cumulative, positions, side="right") - 1, 0, len(a) - 1)
+    frac = (positions - cumulative[edges]) / lengths[edges]
+    return a[edges] + (b[edges] - a[edges]) * frac[:, None]
 
 
 def distance_to_polygon(p, poly):
@@ -2148,18 +2357,23 @@ def distance_to_polygon(p, poly):
     return np.sqrt(np.min(np.sum(delta*delta, axis=2), axis=1))
 
 
-def locate_cube(frame, vision, cal, state, setup, diagnostic_prefix=None):
+def locate_cube(frame, vision, cal, state, setup, diagnostic_prefix=None,
+                banner_suffix="no motion yet"):
     glare_profile = PICK_OBJECT_PROFILE["glare_repair"]
     detection = detect(frame, vision, glare_profile)
     require(detection["status"] == "single_candidate", "Cube detection: " + detection["status"])
     cand = detection["candidates"][0]
-    # Candidate proposals and outline fitting must use the same recovered mask.
-    mask = blue_mask(frame, vision, glare_profile)
+    # Candidate proposals and outline fitting must use the same recovered mask and ROI.
+    h_img, w_img = frame.shape[:2]
+    roi = vision.get("roi_xywh") or [0, 0, w_img, h_img]
+    rx, ry, rw, rh = map(int, roi)
+    mask = blue_mask(frame, vision, glare_profile)[ry:ry+rh, rx:rx+rw]
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    centre = tuple(map(float, cand["centre_px"]))
+    centre = (float(cand["centre_px"][0]) - rx, float(cand["centre_px"][1]) - ry)
     contours = [c for c in contours if cv2.pointPolygonTest(cv2.convexHull(c), centre, False) >= 0]
     require(len(contours) == 1, "Could not isolate the blue cube outline")
-    contour = contours[0]
+    contour = contours[0] + np.array([[[rx, ry]]], dtype=contours[0].dtype)
+    centre = tuple(map(float, cand["centre_px"]))
     hull = cv2.convexHull(contour).reshape(-1, 2).astype(float)
     calibrated_hull = np.asarray(cal["calibrated_image_hull_px"], np.float32)
     # Report how far outside and where, so the operator can nudge the cube or
@@ -2226,10 +2440,11 @@ def locate_cube(frame, vision, cal, state, setup, diagnostic_prefix=None):
         check_stop()
     score, fit = min(solutions, key=lambda item: item[0])
     projected = model(fit)
-    _, intersection = cv2.intersectConvexConvex(projected.astype(np.float32), hull.astype(np.float32))
-    inter_area = cv2.contourArea(intersection) if intersection is not None else 0.0
-    union = cv2.contourArea(projected.astype(np.float32))+cv2.contourArea(hull.astype(np.float32))-inter_area
-    iou = inter_area/union
+    inter_area, _ = cv2.intersectConvexConvex(projected.astype(np.float32), hull.astype(np.float32))
+    inter_area = float(max(0.0, inter_area))
+    union = float(cv2.contourArea(projected.astype(np.float32)) +
+                  cv2.contourArea(hull.astype(np.float32)) - inter_area)
+    iou = inter_area/union if union > 0 else 0.0
     # Rounded faces and an approximate ruler dimension cannot reproduce a
     # sharp box to two pixels. Bound discrepancy in table millimetres using
     # the least sensitive axis of the calibrated local projection instead.
@@ -2245,12 +2460,13 @@ def locate_cube(frame, vision, cal, state, setup, diagnostic_prefix=None):
     # Save both outlines even when size verification stops the run. Never
     # substitute a fitted object size for the user's confirmed dimensions.
     drawn = overlay(frame, detection)
-    # The helper's generic "detection setup only" banner is misleading in Pick.
-    cv2.rectangle(drawn, (0, 0), (drawn.shape[1], 80), (0, 0, 0), -1)
+    # Place cube diagnostics below y=65 so show_image()'s top banner (y=0..65)
+    # does not overwrite or clip them in the live window.
+    cv2.rectangle(drawn, (0, 0), (drawn.shape[1], 125), (0, 0, 0), -1)
     cv2.putText(drawn, "CUBE IMAGE CHECK | green observed; magenta model",
-                (15, 35), cv2.FONT_HERSHEY_SIMPLEX, .7, (0, 255, 255), 2)
+                (15, 92), cv2.FONT_HERSHEY_SIMPLEX, .65, (0, 255, 255), 2)
     cv2.putText(drawn, "RMS %.2f mm | IoU %.3f | planning/motion progress is in the console" %
-                (fit_rms_mm, iou), (15, 65), cv2.FONT_HERSHEY_SIMPLEX, .65, (255, 255, 255), 2)
+                (fit_rms_mm, iou), (15, 118), cv2.FONT_HERSHEY_SIMPLEX, .6, (255, 255, 255), 2)
     cv2.polylines(drawn, [np.rint(hull).astype(np.int32)], True, (0, 255, 0), 2)
     cv2.polylines(drawn, [np.rint(projected).astype(np.int32)], True, (255, 0, 255), 2)
     shape_check = {"profile": PICK_OBJECT_PROFILE, "outline_solidity": float(solidity),
@@ -2263,8 +2479,7 @@ def locate_cube(frame, vision, cal, state, setup, diagnostic_prefix=None):
     if diagnostic_prefix is not None:
         prefix = Path(diagnostic_prefix)
         write_json(prefix.with_name(prefix.name+"_shape_check.json"), shape_check)
-        require(cv2.imwrite(str(prefix.with_name(prefix.name+"_shape_check.png")), drawn),
-                "Could not save cube shape diagnostic image")
+        write_image(prefix.with_name(prefix.name+"_shape_check.png"), drawn)
     require(fit_passed,
             "Known-size 3D cube does not fit blue outline: %.2f px / %.2f mm RMS, IoU %.3f. "
             "See shape_check image/JSON for observed and predicted size; "
@@ -2284,7 +2499,8 @@ def locate_cube(frame, vision, cal, state, setup, diagnostic_prefix=None):
     require(all(cv2.pointPolygonTest(poly, tuple(map(float, p)), True) >=
                 cal["workspace"]["cube_edge_clearance_mm"] for p in footprint),
             "Cube footprint is outside the paper or within 5 mm of its edge")
-    show_image(drawn, "FRESH SNAPSHOT | cube top-face fit %.2f px | no motion yet" % math.sqrt(score))
+    show_image(drawn, "FRESH SNAPSHOT | cube top-face fit %.2f px | %s" %
+               (math.sqrt(score), banner_suffix))
     return {"centre_base_mm": point.tolist(), "closing_axis_base": edge.tolist(),
             "yaw_table_rad": float(fit[2]), "fit_rms_px": math.sqrt(score), "silhouette_iou": iou,
             "fit_rms_mm": fit_rms_mm,
@@ -2454,6 +2670,7 @@ class FramingGuide:
         df = self.features(target)-self.features(rec["T_base_flange"])
         delta = self.response@df
         height = max(float(rec["T_base_camera_mount"][2][3])-self.setup["table_initial_z_mm"], 150)
+        require(height+df[2] > 0, "Framing proposal exceeds the local image-response range")
         scale = height/(height+df[2])
         require(.7 <= scale <= 1.3, "Framing proposal exceeds the local image-response range")
         centre = np.asarray(rec["framing_guide"]["image_centre_px"])
@@ -2690,7 +2907,7 @@ def apply_measured_paper_workspace(controller, planner, guide, rec, setup, folde
     keys = ("left", "right", "behind", "toward_user")
     require(all(k in limits and math.isfinite(float(limits[k])) and float(limits[k]) > 10 for k in keys),
             "Measured paper limits are missing; no workspace expansion is allowed")
-    frame = cv2.imread(str(folder/rec["image_file"]))
+    frame = read_image(folder/rec["image_file"])
     require(frame is not None, "Fresh paper-direction snapshot could not be reopened")
     h, ray = guide.measure(rec)
     direction = np.asarray(FIXED_CALIBRATION["toward_user_board_xy"], float)
@@ -2714,7 +2931,7 @@ def apply_measured_paper_workspace(controller, planner, guide, rec, setup, folde
         at = np.clip(b+[10, -10], [5, 90], [1550, 1050]).astype(int)
         cv2.putText(drawn, label, tuple(at), cv2.FONT_HERSHEY_SIMPLEX, .7, colour, 2)
     show_image(drawn, "FIXED TABLE DIRECTIONS: yellow TOWARDS YOU; cyan YOUR RIGHT")
-    cv2.imwrite(str(folder/"paper_direction_confirmation.png"), drawn)
+    write_image(folder/"paper_direction_confirmation.png", drawn)
     current = controller.stable(powered=True, empty=True)
     require(np.max(np.abs(np.asarray(current["joints"])-rec["state_after"]["joints"])) < .05,
             "Robot moved while orienting the paper; no rectangle was applied")
@@ -2779,7 +2996,7 @@ def acquire_calibration_board(camera, controller, planner, cfg, setup, folder):
             "after centring if the pattern still fills too much of the image. The old "
             "upward-first sweep is removed.\n\n"
             "Command speed/acceleration/deceleration remain 100%. Existing joint limits, "
-            "collision checks and your confirmed measured paper rectangle remain. Keep the clear board fixed. "
+            "collision checks and the fixed measured paper rectangle remain. Keep the clear board fixed. "
             "Every correction is verified in a fresh image; lost/inconsistent reference stops.")
     # A separate framing confirmation can take time. Refresh before moving.
     ready = capture("anchor_ready")
@@ -2789,7 +3006,7 @@ def acquire_calibration_board(camera, controller, planner, cfg, setup, folder):
     _, old_ray = guide.measure(rec)
     _, ready_ray = guide.measure(ready)
     require(np.linalg.norm(ready_ray-old_ray) <= 2,
-            "Board changed during direction/framing confirmation; stopped before a correction")
+            "Board changed during framing confirmation; stopped before a correction")
     rec = ready
     view = controller.physical_pose(cfg["observation"]["pose"])
     stalled = 0
@@ -2890,21 +3107,32 @@ def _route_kinematics_checker(planner):
 def bounded_route_chunks(planner, route):
     """Split a joint route into <=7 mm / 1.5 deg checkpoints along every edge."""
     _, within = _route_kinematics_checker(planner)
+
+    def subdivide_edge(q_a, q_b, depth=0):
+        if within(q_a, q_b, 7, 1.5):
+            return [q_b]
+        require(depth < 6, "Route sample exceeds bounded collection step; stopped before motion")
+        mid = 0.5 * (np.asarray(q_a, float) + np.asarray(q_b, float))
+        return subdivide_edge(q_a, mid, depth + 1) + subdivide_edge(mid, q_b, depth + 1)
+
     chunks = []
     for a, b in zip(route, route[1:]):
         dense = planner.samples(a, b)
+        refined = [dense[0]]
+        for q_prev, q_next in zip(dense, dense[1:]):
+            refined.extend(subdivide_edge(q_prev, q_next))
         first = last = 0
         # Preserve every original route edge; never shortcut a checked detour.
-        for end in range(1, len(dense)):
-            if not within(dense[first], dense[end], 7, 1.5):
+        for end in range(1, len(refined)):
+            if not within(refined[first], refined[end], 7, 1.5):
                 require(last > first, "Route sampling cannot satisfy bounded collection steps")
-                chunks.append(dense[last].tolist())
+                chunks.append(np.asarray(refined[last], float).tolist())
                 first = last
-                require(within(dense[first], dense[end], 7, 1.5),
+                require(within(refined[first], refined[end], 7, 1.5),
                         "Route sample exceeds bounded collection step; stopped before motion")
             last = end
         if last > first:
-            chunks.append(dense[last].tolist())
+            chunks.append(np.asarray(refined[last], float).tolist())
     if not chunks:
         chunks = [list(map(float, route[-1]))]
     return chunks
@@ -3271,6 +3499,7 @@ def ensure_gripper_open(controller, setup, folder):
     Otherwise the operator is told to remove any object and must approve one
     open command, so nothing is released without an explicit confirmation.
     """
+    validate_gripper_setup(setup)
     hand = setup["gripper"]
     open_mm = float(hand["open_position_mm"])
     state = controller.stable()
@@ -3286,23 +3515,28 @@ def ensure_gripper_open(controller, setup, folder):
             "clear of the fingers and of the area below them. Cancel stops without "
             "moving the gripper." % (state["hand_position"],
                                      ", holding" if state["hand_holding"] else "", open_mm))
+    acquired_here = not controller.owned
     controller.take()
-    before = controller.stable(powered=True)
-    if not before["hand_holding"] and abs(before["hand_position"] - open_mm) <= .4:
-        return before
-    write_json(folder/"startup_gripper_open.json", {"stage": "opening", "before": before})
-    controller.check_frames()
-    controller.check_motion_state()
-    log("Gripper is not open: opening to %.1f mm at the current pose." % open_mm)
-    controller.hand("HandMoveA", [open_mm, float(hand["open_speed_percent"]), "Next"])
-    controller.wait_hand(lambda: abs(controller.hand("HandCurPos")-open_mm) < .4 and
-                         not controller.hand("HandHoldState"))
-    after = controller.stable(powered=True, empty=True)
-    require(np.max(np.abs(np.asarray(after["joints"])-before["joints"])) < .05,
-            "Arm moved during gripper opening; stopped")
-    write_json(folder/"startup_gripper_open.json",
-               {"stage": "empty_verified", "before": before, "after": after})
-    return after
+    try:
+        before = controller.stable(powered=True)
+        if not before["hand_holding"] and abs(before["hand_position"] - open_mm) <= .4:
+            return before
+        write_json(folder/"startup_gripper_open.json", {"stage": "opening", "before": before})
+        controller.check_frames()
+        controller.check_motion_state()
+        log("Gripper is not open: opening to %.1f mm at the current pose." % open_mm)
+        controller.hand("HandMoveA", [open_mm, float(hand["open_speed_percent"]), "Next"])
+        controller.wait_hand(lambda: abs(controller.hand("HandCurPos")-open_mm) < .4 and
+                             not controller.hand("HandHoldState"))
+        after = controller.stable(powered=True, empty=True)
+        require(np.max(np.abs(np.asarray(after["joints"])-before["joints"])) < .05,
+                "Arm moved during gripper opening; stopped")
+        write_json(folder/"startup_gripper_open.json",
+                   {"stage": "empty_verified", "before": before, "after": after})
+        return after
+    finally:
+        if acquired_here and controller.owned:
+            controller.release_arm()
 
 
 def run_calibration(rdk, cfg, vision, setup, folder):
@@ -3315,10 +3549,10 @@ def run_calibration(rdk, cfg, vision, setup, folder):
     records = []
     try:
         with Controller(cfg, setup) as controller:
-            state = controller.prepare_for_motion(folder, empty=False)
-            state = ensure_gripper_open(controller, setup, folder)
             report = controller.speed_report()
             write_json(folder/"speed_report.json", report)
+            state = controller.prepare_for_motion(folder, empty=False)
+            state = ensure_gripper_open(controller, setup, folder)
             write_json(folder/"start_state.json", {"state": state, "speeds": report,
                        "setup": setup, "frames": controller.frames()})
             planner = Planner(rdk, controller, setup)
@@ -3342,7 +3576,7 @@ def run_calibration(rdk, cfg, vision, setup, folder):
                     "All fixtures/cables must fit the model or be clear of the swept area.")
             controller.take()
             current = controller.stable(powered=True, empty=True)
-            if np.max(np.abs(np.asarray(current["joints"])-cfg["observation"]["joints"])) < .05:
+            if np.max(np.abs(np.asarray(current["joints"])-cfg["observation"]["joints"][:6])) < .05:
                 view_check(current, cfg)
                 planner.sync_check(current)
                 require(planner.valid(current["joints"]), "Saved VIEW fails workspace/collision checks")
@@ -3370,7 +3604,6 @@ def run_calibration(rdk, cfg, vision, setup, folder):
             result = fit_calibration(records, setup, folder)
             result["binding"] = {"observation": cfg["observation"], "frames": controller.frames(),
                                  "vision_settings_fingerprint": fingerprint(vision_settings(vision)),
-                                 "vision_fingerprint": fingerprint(vision),
                                  "geometry_fingerprint": fingerprint(geometry_binding(setup)),
                                  "geometry": geometry_binding(setup),
                                  "robot_ip": cfg["robot_ip"], "camera_ip": vision["camera_ip"]}
@@ -3465,10 +3698,13 @@ def _cartesian_joint_path(planner, h_start, h_end, q_start):
         # Joint subsegments approximate a Cartesian normal move; bound departure.
         a, b = planner.fk(path[-1])[:3, 3], planner.fk(q)[:3, 3]
         for sample in planner.samples(path[-1], q):
-            p = planner.fk(sample)[:3, 3]
+            h_sample = planner.fk(sample)
+            p = h_sample[:3, 3]
             v = b-a
             nearest = a+v*np.clip(np.dot(p-a, v)/max(np.dot(v, v), 1e-10), 0, 1)
             require(np.linalg.norm(p-nearest) < .2, "Joint approximation deviates from straight approach")
+            require(rotation_error(h_sample, h_start) <= planner.setup["planning"]["angle_tolerance_deg"],
+                    "Joint approximation rotates away from straight approach orientation")
         path.append(q.tolist())
     # The dense path is already validated step by step: planner.ik() checks
     # controller range and J2P at every dense waypoint, planner.edge() checks
@@ -3481,17 +3717,28 @@ def _cartesian_joint_path(planner, h_start, h_end, q_start):
     return compact
 
 
+def validate_pick_motion_config(cfg, setup):
+    clearance = float(cfg["approach_clearance_mm"])
+    lift = float(cfg["lift_mm"])
+    min_clearance = (float(setup["cube_height_mm"]) - float(setup["tip_clearance_mm"]) +
+                     float(setup["planning"]["margin_mm"]))
+    require(math.isfinite(clearance) and clearance > min_clearance,
+            "approach_clearance_mm (%.2f) must be > %.2f mm so open fingers clear the cube top at approach" %
+            (clearance, min_clearance))
+    require(math.isfinite(lift) and lift > 0, "lift_mm must be finite and positive")
+    return clearance, lift
+
+
 def plan_pick(planner, controller, cube, cal, cfg, setup):
     n = np.asarray(cal["table"]["normal_base"])
     y0 = np.asarray(cube["closing_axis_base"])
     fg = planner.grasp_tcp
     seed = np.asarray(controller.stable()["joints"])
-    clearance, lift = float(cfg["approach_clearance_mm"]), float(cfg["lift_mm"])
-    require(clearance > 0 and lift > 0, "Approach and lift distances must be positive")
+    clearance, lift = validate_pick_motion_config(cfg, setup)
     errors = []
     for angle in [0, math.pi/2, math.pi, -math.pi/2]:
         planner.set_payload(None)
-        planner.set_target_cube(cube, cal)
+        planner.set_target_cube(cube, cal, finger_collision=True)
         try:
             log("Planning grasp orientation %.0f deg: approach, descent, lift and held return." %
                 math.degrees(angle))
@@ -3503,12 +3750,13 @@ def plan_pick(planner, controller, cube, cal, cfg, setup):
             approach, lifted = grasp.copy(), grasp.copy()
             approach[:3, 3] += n*clearance
             lifted[:3, 3] += n*lift
-            # Try the validated IK branches for a clear straight approach first;
-            # the nearest solution and the full RRT remain the fallback.
+            # Keep finger-vs-target collision enabled for the entire approach transit.
             qa, to_approach = planner.route_to_ik(approach, seed)
+            planner.preflight(to_approach, "planned approach")
+            # Disable finger-vs-target only for the straight vertical descent onto the cube.
+            planner.set_target_finger_collision(False)
             down = cartesian_joint_path(planner, approach, grasp, qa)
-            for label, path in (("planned approach", to_approach), ("planned descent", down)):
-                planner.preflight(path, label)
+            planner.preflight(down, "planned descent")
             planner.set_target_cube(None)
             # Open/closed swept finger envelope remains in the model throughout.
             up = cartesian_joint_path(planner, grasp, lifted, down[-1])
@@ -3537,7 +3785,7 @@ def plan_pick(planner, controller, cube, cal, cfg, setup):
             planner.enable_pair(payload_item, planner.obstacles[0])
             planner.cache.clear()
             planner.set_payload(None)
-            planner.set_target_cube(cube, cal)
+            planner.set_target_cube(cube, cal, finger_collision=True)
             return {"to_approach": to_approach, "down": down, "up": up, "back": back,
                     "payload_bounds_flange_mm": payload, "T_base_flange_grasp": grasp.tolist(),
                     "T_flange_grasp": fg.tolist(),
@@ -3555,6 +3803,7 @@ def plan_pick(planner, controller, cube, cal, cfg, setup):
 def run_pick(rdk, cfg, vision, setup, folder, execute):
     log("Operation selected: %s." % ("PICK - physical motion after approval and route checks" if execute
                                      else "PREVIEW - image capture and planning"))
+    validate_pick_motion_config(cfg, setup)
     link = cfg.get("calibration_v2")
     require(link and link["schema"] == SCHEMA, "Run automatic calibration first")
     cal = read_json(ROOT/link["path"])
@@ -3564,12 +3813,12 @@ def run_pick(rdk, cfg, vision, setup, folder, execute):
     try:
         with Controller(cfg, setup) as controller:
             bind_calibration(cal, cfg, vision, setup, controller.frames())
+            report = controller.speed_report()
+            write_json(folder/"speed_report.json", report)
             # Pick may start with a latched HandHoldState after manual removal.
             # Confirmed opening below must verify empty before any arm movement.
             state = (controller.prepare_for_motion(folder, empty=False) if execute
                      else ensure_gripper_open(controller, setup, folder))
-            report = controller.speed_report()
-            write_json(folder/"speed_report.json", report)
             require("workspace" in cal and "controller_reference" in cal["binding"],
                     "Recalibrate with the reference-corrected version and mark the paper boundary first")
             with TIMINGS.phase("pick.planner_setup"):
@@ -3629,7 +3878,7 @@ def run_pick(rdk, cfg, vision, setup, folder, execute):
                 with TIMINGS.phase("pick.locate_cube"):
                     fit, drawn = locate_cube(frame, vision, cal, rec["state_after"], setup, prefix)
                 write_json(prefix.with_name(prefix.name+"_fit.json"), fit)
-                cv2.imwrite(str(prefix.with_name(prefix.name+"_fit.png")), drawn)
+                write_image(prefix.with_name(prefix.name+"_fit.png"), drawn)
                 fits.append(fit)
                 pause(.3)
             require(np.linalg.norm(np.asarray(fits[0]["centre_base_mm"])-fits[1]["centre_base_mm"]) < .8,
@@ -3640,13 +3889,14 @@ def run_pick(rdk, cfg, vision, setup, folder, execute):
             plan = plan_pick(planner, controller, fits[-1], cal, cfg, setup)
             write_json(folder/"pick_plan.json", plan)
             if not execute:
-                log("Preview saved. No robot or gripper movement. Preview plans are never replayed; Pick captures again.")
+                log("Preview saved. No arm movement. Preview plans are never replayed; Pick captures again.")
                 return
             log("Pick route prepared. Capturing final cube verification before opening the gripper.")
             # Planning may take time. Refresh perception before opening or moving away.
             frame, rec, prefix = camera.frame("pick_final_fresh_check", controller)
             with TIMINGS.phase("pick.locate_cube"):
-                latest, _ = locate_cube(frame, vision, cal, rec["state_after"], setup, prefix)
+                latest, _ = locate_cube(frame, vision, cal, rec["state_after"], setup, prefix,
+                                        banner_suffix="final cube check")
             require(np.linalg.norm(np.asarray(latest["centre_base_mm"])-fits[-1]["centre_base_mm"]) < .8,
                     "Cube changed during planning; discard plan")
             require(abs((latest["yaw_table_rad"]-fits[-1]["yaw_table_rad"]+math.pi/4) %
@@ -3663,9 +3913,11 @@ def run_pick(rdk, cfg, vision, setup, folder, execute):
             else:
                 log("Final cube check passed. Opening gripper to %.1f mm." % hand["open_position_mm"])
                 controller.hand("HandMoveA", [float(hand["open_position_mm"]), float(hand["open_speed_percent"]), "Next"])
-                controller.wait_hand(lambda: abs(controller.hand("HandCurPos")-hand["open_position_mm"]) < .4)
+                controller.wait_hand(lambda: abs(controller.hand("HandCurPos")-hand["open_position_mm"]) < .4 and
+                                     not controller.hand("HandHoldState"))
                 require(not controller.hand("HandHoldState"), "Gripper unexpectedly reports holding after opening")
             planner.execute(plan["to_approach"], "Approach cube", report_progress=True)
+            planner.set_target_finger_collision(False)
             planner.execute(plan["down"], "Descend along table normal", report_progress=True)
             controller.check_frames()
             controller.check_motion_state()
@@ -3732,7 +3984,7 @@ def save_current_view(cfg, vision, setup):
                     "Robot moved during VIEW preview; nothing saved")
             log("Current controller pose: " + str(after["pose"]))
             log("Current controller joints: " + str(after["joints"]))
-            confirm("SAVE CURRENT POSE AS VIEW - no robot movement. Confirm the camera "
+            confirm("SAVE CURRENT POSE AS VIEW - no arm movement. Confirm the camera "
                     "image shows your paper and the board is visible. Your measured paper "
                     "edges must be relative to THIS pose: %g mm left, %g mm right, "
                     "%g mm behind and %g mm toward you. The old VIEW is backed up and "
@@ -3749,9 +4001,12 @@ def save_current_view(cfg, vision, setup):
             CONFIG["observation"] = new_observation
             CONFIG.pop("calibration_v2", None)
             write_json(CONFIG_FILE, CONFIG, backup=True)
-            log("New VIEW saved. No motion performed. Run calibrate separately to collect new data.")
+            log("New VIEW saved. No arm motion performed. Run calibrate separately to collect new data.")
     finally:
-        camera.close()
+        try:
+            camera.close()
+        except Exception as exc:
+            log("Camera cleanup: " + str(exc))
         cv2.destroyAllWindows()
         _WINDOW_READY = False
 
@@ -3805,7 +4060,7 @@ def choose_operation(default_mode):
             pass
         tk.Label(root, justify="left", padx=14, pady=10, text=(
             "Choose the operation, then press OK.\n"
-            "preview: check the cube and plan, no motion.\n"
+            "preview: check the cube and plan, no arm motion.\n"
             "pick: physical pick/lift, with its own confirmations.\n"
             "calibrate: collect a fresh calibration.\n"
             "status / set-view / board / instructions: no arm motion.")).pack(anchor="w")
@@ -3845,10 +4100,27 @@ def choose_operation(default_mode):
                 pass
 
 
+def _connect_robodk_if_running():
+    port = int(os.environ.get("ROBODK_API_PORT", "20500"))
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.15):
+            pass
+    except OSError:
+        return None
+    try:
+        return robolink.Robolink(port=port)
+    except Exception:
+        return None
+
+
 def main(forced_mode=None):
     global RDK, STOP, STOP_REASON, _WINDOW_READY, CONFIG
     STOP = False
     STOP_REASON = None
+    RDK = None
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--mode", choices=list(OPERATIONS))
+    args = parser.parse_args() if forced_mode is None else argparse.Namespace(mode=forced_mode)
     print("COBOTTA project folder:", ROOT, flush=True)
     print("COBOTTA Python revision:", PROGRAM_REVISION, flush=True)
     signal.signal(signal.SIGINT, stop_signal)
@@ -3856,10 +4128,6 @@ def main(forced_mode=None):
         signal.signal(signal.SIGTERM, stop_signal)
     require(not (ROOT/"STOP_COBOTTA").exists(),
             "STOP_COBOTTA latch exists. Resolve stop reason and remove it manually before restarting.")
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=list(OPERATIONS))
-    args = parser.parse_args() if forced_mode is None else argparse.Namespace(mode=forced_mode)
-    RDK = robolink.Robolink()
     mode = args.mode
     operations = OPERATIONS
     if mode is None:
@@ -3885,14 +4153,16 @@ def main(forced_mode=None):
             if mode not in operations:
                 log("Unknown operation %r. Enter one of: %s" % (mode, ", ".join(operations)))
     require(mode in operations, "Unknown operation")
+    check_stop(pump=True)
     if mode in ("board", "instructions"):
         path = ROOT/(PRINTABLE_BOARD if mode == "board" else "docs/OPERATING.md")
         if mode == "board":
-            require(board_pdf_matches(path),
+            require(path.is_file() and board_pdf_matches(path),
                     "The board PDF has changed; restore the supplied US Letter sheet")
         log(str(path))
         os.startfile(str(path))
         return
+    RDK = robolink.Robolink() if mode in ("calibrate", "preview", "pick") else _connect_robodk_if_running()
     CONFIG = _load_config()
     cfg = {"robot_ip": CONFIG["robot_ip"], "observation": CONFIG["observation"],
            "speed_percent": CONFIG["speed_percent"],
@@ -3916,6 +4186,7 @@ def main(forced_mode=None):
         save_current_view(cfg, vision, setup)
         return
     if mode == "status":
+        check_stop(pump=True)
         with Controller(cfg, setup) as controller:
             state = controller.state()
             data = {"state": state, "frames": controller.frames(), "speeds": controller.speed_report(),
@@ -3943,7 +4214,10 @@ def main(forced_mode=None):
                 failure["speed_report"] = read_json(folder/"speed_report.json")
         except Exception as report_error:
             log("speed_report.json could not be added to failure.json: " + str(report_error))
-        write_json(folder/"failure.json", failure)
+        try:
+            write_json(folder/"failure.json", failure)
+        except Exception as write_error:
+            log("failure.json could not be written (ignored): " + str(write_error))
         log("STOPPED: " + str(exc))
         raise
     finally:

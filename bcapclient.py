@@ -26,6 +26,7 @@ THE SOFTWARE.
 import select
 import socket
 import struct
+import time
 from ctypes import *
 from datetime import datetime
 from orinexception import *
@@ -35,6 +36,7 @@ from variant import VarType
 class BCAPClient:
   _BCAP_SOH = 0x1
   _BCAP_EOT = 0x4
+  _MAX_PACKET_LEN = 16_000_000
 
   _TIME_DIFFERENCE = 25569.0
   _SEC_ONEDAY = 24 * 60 * 60
@@ -740,34 +742,47 @@ class BCAPClient:
     return struct.pack(format, *packet_data)
 
   def _bcap_recv(self):
+    mismatched_serials = 0
     while True:
+      deadline = time.monotonic() + self._timeout
       buf_all = b''
 
-      buf_tmp = self._recv_with_select(1)
+      buf_tmp = self._recv_with_select(1, deadline)
+      if buf_tmp[0] != BCAPClient._BCAP_SOH:
+        raise ORiNException(HResult.E_INVALIDPACKET)
       buf_all = b''.join([buf_all, buf_tmp])
 
-      buf_tmp  = self._recv_with_select(4)
+      buf_tmp  = self._recv_with_select(4, deadline)
       len_recv = struct.unpack("<I", buf_tmp)
       buf_all  = b''.join([buf_all, buf_tmp])
 
-      if len_recv[0] < 16:
+      if len_recv[0] < 16 or len_recv[0] > BCAPClient._MAX_PACKET_LEN:
         raise ORiNException(HResult.E_INVALIDPACKET)
 
-      buf_tmp = self._recv_with_select(len_recv[0] - 5)
+      buf_tmp = self._recv_with_select(len_recv[0] - 5, deadline)
       buf_all = b''.join([buf_all, buf_tmp])
 
       (serial, version, hresult, retvals) = self._deserialize(buf_all)
 
       if (self._serial == serial) and (hresult != HResult.S_EXECUTING):
         break
+      if self._serial != serial:
+        mismatched_serials += 1
+        if mismatched_serials > 16:
+          raise ORiNException(HResult.E_INVALIDPACKET)
 
     return (serial, version, hresult, retvals)
 
-  def _recv_with_select(self, len_recv):
+  def _recv_with_select(self, len_recv, deadline=None):
     buf_recv = b''
-    while True:
+    if deadline is None:
+      deadline = time.monotonic() + self._timeout
+    while len(buf_recv) < len_recv:
+      remaining = deadline - time.monotonic()
+      if remaining <= 0:
+        raise ORiNException(HResult.E_TIMEOUT)
       (reads, writes, errors) = select.select(
-        [self._sock], [], [], self._timeout)
+        [self._sock], [], [], remaining)
 
       if len(reads) == 0:
         raise ORiNException(HResult.E_TIMEOUT)
@@ -776,9 +791,6 @@ class BCAPClient:
       if not buf_tmp:
         raise ORiNException(HResult.E_NOT_CONNECTED)
       buf_recv = b''.join([buf_recv, buf_tmp])
-
-      if len(buf_recv) >= len_recv:
-        break
 
     return buf_recv
 

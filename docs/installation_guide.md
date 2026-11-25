@@ -2,7 +2,7 @@
 
 ## Requirements
 
-- Windows with RoboDK and a station containing the DENSO COBOTTA model (`pickandplace`).
+- Windows with RoboDK and a station containing only the single DENSO COBOTTA robot item named `Denso Cobotta` (per `robot` in `automatic_setup.json`).
 - RoboDK embedded Python (`C:\RoboDK\Python-Embedded\python.exe`).
 - `numpy` 1.25.x and `opencv-contrib-python` **4.5.5** (must include `cv2.aruco`). Other OpenCV versions are rejected because ChArUco corner ID and coordinate conventions differ across versions.
 - DENSO COBOTTA controller reachable over b-CAP (TCP port 5007).
@@ -11,7 +11,7 @@
 
 ## 1. Clone the repository
 
-Clone the repository under your user profile (for example `C:\Users\<you>\Documents\cobottaPickAndLift`):
+Clone the repository under your user profile (for example `C:\Users\<you>\Documents\CobottaPickAndLift`):
 
 ```powershell
 git clone https://github.com/William4567/CobottaPickAndLift.git
@@ -24,7 +24,7 @@ Skip this step if `C:\RoboDK\Python-Embedded\python.exe` already has `numpy` 1.2
 To install the pinned packages locally inside the repository without modifying `C:\RoboDK`:
 
 ```powershell
-"C:\RoboDK\Python-Embedded\python.exe" -m pip install --target "C:\Users\<you>\Documents\cobottaPickAndLift\vendor" "numpy==1.25.2" "opencv-contrib-python==4.5.5.64"
+"C:\RoboDK\Python-Embedded\python.exe" -m pip install --target "C:\Users\<you>\Documents\CobottaPickAndLift\vendor" "numpy==1.25.2" "opencv-contrib-python==4.5.5.64"
 ```
 
 `cobotta_calibrate_pick.py` prepends `vendor\` to `sys.path` at startup.
@@ -45,7 +45,7 @@ Leave the remaining defaults unless your cell differs:
 - `approach_clearance_mm` (`40`), `lift_mm` (`30`)
 - `speed_percent` (must remain `100`)
 - `observation` — populated automatically when you run `set-view`
-- `vision` — HSV thresholds, ROI, and contour filters for blue-cube detection (tunable with `detect_blue.py`)
+- `vision` — HSV thresholds, ROI, and contour filters for blue-cube detection (tunable with `detect_blue.py`; changing any `vision` field invalidates an existing calibration binding and requires recalibration)
 
 Do not commit your filled `config.json`. To reset placeholders before committing:
 
@@ -65,7 +65,7 @@ Whenever you update `cobotta_calibrate_pick.py` on disk (for example after `git 
 You can also run the script directly from PowerShell (pass `--mode <operation>` to skip the menu):
 
 ```powershell
-cd C:\Users\<you>\Documents\cobottaPickAndLift
+cd C:\Users\<you>\Documents\CobottaPickAndLift
 "C:\RoboDK\Python-Embedded\python.exe" cobotta_calibrate_pick.py --mode status
 ```
 
@@ -73,11 +73,11 @@ cd C:\Users\<you>\Documents\cobottaPickAndLift
 
 ## Standalone cube-detection check (`detect_blue.py`)
 
-To verify or tune `vision` HSV thresholds without touching the robot:
+To verify or tune `vision` HSV thresholds without touching the robot (pass `--glare-repair` to match `preview`/`pick` dark-glare recovery; any changes to `config.json` `vision` fields require recalibration):
 
 ```powershell
-"C:\RoboDK\Python-Embedded\python.exe" detect_blue.py --live
-"C:\RoboDK\Python-Embedded\python.exe" detect_blue.py --image path\to\capture.jpg --headless
+"C:\RoboDK\Python-Embedded\python.exe" detect_blue.py --live --glare-repair
+"C:\RoboDK\Python-Embedded\python.exe" detect_blue.py --image path\to\capture.jpg --headless --glare-repair
 ```
 
 Press `Esc` or `Q` to close the live viewer. Captures and overlays are saved under `captures/`.
